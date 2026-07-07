@@ -60,6 +60,30 @@ PRESET_STORMS: Dict[str, EnvironmentStorm] = {
 }
 
 
+@dataclass
+class Iceberg:
+    name: str
+    x: float
+    y: float
+    radius: float = 100.0
+
+
+# Default systemic constraint icebergs
+DEFAULT_ICEBERGS: List[Iceberg] = [
+    Iceberg(name="Budget Lockout", x=-50.0, y=300.0, radius=100.0),
+    Iceberg(name="Compliance Deadlock", x=60.0, y=600.0, radius=100.0),
+    Iceberg(name="Schedule Slippage", x=150.0, y=200.0, radius=100.0),
+    Iceberg(name="Scope Creep", x=-200.0, y=100.0, radius=100.0)
+]
+
+# Predefined opposing constraint pairs for deadlock checking
+DEFAULT_OPPOSING_PAIRS: List[Tuple[str, str]] = [
+    ("RIGID_TIMELINE", "FREEZE_HEADCOUNT"),
+    ("REDUCE_COST", "EXPAND_SCOPE"),
+    ("STRICT_QUALITY", "ACCELERATE_DELIVERY")
+]
+
+
 class SimulationEngine:
     @staticmethod
     def calculate_resultant_vector(intent_v: Vector2D, storms: List[EnvironmentStorm]) -> Vector2D:
@@ -74,33 +98,113 @@ class SimulationEngine:
         return Vector2D.from_cartesian(total_dx, total_dy)
 
     @staticmethod
+    def check_logical_deadlocks(
+        declared_constraints: List[str],
+        custom_pairs: List[Tuple[str, str]] = None
+    ) -> List[Tuple[str, str]]:
+        """Check for active system deadlocks when opposing constraints are simultaneously declared."""
+        active_deadlocks = []
+        pairs_to_check = DEFAULT_OPPOSING_PAIRS + (custom_pairs or [])
+        
+        # Normalize constraints to set for constant-time lookup
+        constraints_set = {c.upper() for c in declared_constraints}
+        
+        for p1, p2 in pairs_to_check:
+            if p1.upper() in constraints_set and p2.upper() in constraints_set:
+                active_deadlocks.append((p1, p2))
+                
+        return active_deadlocks
+
+    @staticmethod
+    def check_trajectory_collision(
+        start_x: float,
+        start_y: float,
+        resultant_v: Vector2D,
+        icebergs: List[Iceberg]
+    ) -> List[Iceberg]:
+        """Project trajectory 3 turns in the future and check for circle capsule intersection."""
+        dx, dy = resultant_v.to_cartesian()
+        
+        # End coordinates after 3 turns
+        end_x = start_x + 3.0 * dx
+        end_y = start_y + 3.0 * dy
+        
+        seg_dx = end_x - start_x
+        seg_dy = end_y - start_y
+        seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy
+        
+        intersecting_icebergs = []
+        
+        for iceberg in icebergs:
+            # Vector from start of segment to iceberg center
+            to_center_x = iceberg.x - start_x
+            to_center_y = iceberg.y - start_y
+            
+            if seg_len_sq < 1e-9:
+                # Segment is effectively a point (no movement)
+                dist_sq = to_center_x * to_center_x + to_center_y * to_center_y
+            else:
+                # Project center onto segment, clamped to [0, 1]
+                t = (to_center_x * seg_dx + to_center_y * seg_dy) / seg_len_sq
+                t = max(0.0, min(1.0, t))
+                
+                # Find closest point on segment
+                closest_x = start_x + t * seg_dx
+                closest_y = start_y + t * seg_dy
+                
+                # Distance from closest point to center
+                diff_x = iceberg.x - closest_x
+                diff_y = iceberg.y - closest_y
+                dist_sq = diff_x * diff_x + diff_y * diff_y
+                
+            if dist_sq <= iceberg.radius * iceberg.radius:
+                intersecting_icebergs.append(iceberg)
+                
+        return intersecting_icebergs
+
+    @staticmethod
     def execute_turn(
         current_x: float,
         current_y: float,
         intent_v: Vector2D,
         active_storms: List[EnvironmentStorm],
-        base_burn_rate: float
+        base_burn_rate: float,
+        declared_constraints: List[str],
+        custom_icebergs: List[Iceberg] = None,
+        custom_opposing_pairs: List[Tuple[str, str]] = None
     ) -> Dict[str, Any]:
-        """Execute a single simulation step.
+        """Execute a single simulation step resolving deadlocks and checking for collisions."""
+        # 1. Check for deadlocks
+        active_deadlocks = SimulationEngine.check_logical_deadlocks(
+            declared_constraints, custom_opposing_pairs
+        )
         
-        Computes forward progression, lateral drift, calculates friction-based financial
-        burn-rate, and returns the step telemetry.
-        """
-        # Calculate the resultant velocity vector
-        resultant_v = SimulationEngine.calculate_resultant_vector(intent_v, active_storms)
+        # If deadlocked, intentional velocity drops to 0
+        resolved_intent = intent_v
+        if active_deadlocks:
+            resolved_intent = Vector2D(magnitude=0.0, heading_degrees=intent_v.heading_degrees)
+            
+        # 2. Compute resultant vector
+        resultant_v = SimulationEngine.calculate_resultant_vector(resolved_intent, active_storms)
         dx, dy = resultant_v.to_cartesian()
         
-        # Advance ship position
+        # 3. Advance ship position
         new_x = current_x + dx
         new_y = current_y + dy
         
-        # Calculate the financial cost of this turn
+        # 4. Check for collision threats along the path (look-ahead)
+        all_icebergs = DEFAULT_ICEBERGS + (custom_icebergs or [])
+        collisions = SimulationEngine.check_trajectory_collision(
+            current_x, current_y, resultant_v, all_icebergs
+        )
+        
+        # 5. Calculate financial cost of this turn
         friction_mult = 1.0
         for storm in active_storms:
             friction_mult *= storm.cost_friction_multiplier
         actual_burn_rate = base_burn_rate * friction_mult
         
-        # Quantify absolute angular drift delta (shortest angular distance on a circle)
+        # 6. Quantify absolute angular drift delta
         theta_a = intent_v.heading_degrees
         theta_g = resultant_v.heading_degrees
         angle_diff = abs(theta_g - theta_a) % 360.0
@@ -110,5 +214,7 @@ class SimulationEngine:
             "new_position": {"x": new_x, "y": new_y},
             "resultant_vector": resultant_v,
             "actual_burn_rate": actual_burn_rate,
-            "angular_drift_delta": angular_drift_delta
+            "angular_drift_delta": angular_drift_delta,
+            "deadlocks": active_deadlocks,
+            "collision_threats": collisions
         }
