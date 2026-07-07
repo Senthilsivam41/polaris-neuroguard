@@ -40,3 +40,10 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 The server will start at `http://127.0.0.1:8000`. You can verify the setup by visiting `http://127.0.0.1:8000/health`.
+
+## 🪵 Ponytail Audit: Optimization Log
+
+Following strict YAGNI and KISS principles, we audited the initial codebase and applied the following cleanups:
+* **Modular Refactoring**: Removed the state-less `SimulationEngine` object wrapper and its `@staticmethod` annotations, converting the vector mathematics and execution logic into high-performance, module-level functions in [simulation.py](file:///Users/sendils/work/repo/adk-2_0/polaris-neuroguard/app/core/simulation.py).
+* **Boilerplate Reduction**: Eliminated Pydantic `Settings` class wrapper in favor of plain static constants in [config.py](file:///Users/sendils/work/repo/adk-2_0/polaris-neuroguard/app/core/config.py) to save unnecessary object instantiations.
+* **Payload Simplification**: Streamlined the Human-in-the-Loop (`hitl_interception_data`) reason-construction block in [endpoints.py](file:///Users/sendils/work/repo/adk-2_0/polaris-neuroguard/app/api/endpoints.py), removing intermediate variables and multiple string concatenation steps.
