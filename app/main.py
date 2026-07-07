@@ -1,7 +1,7 @@
 import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from app.core.config import settings
+from app.core.config import PROJECT_NAME, VERSION, API_V1_STR
 from app.api.endpoints import router as api_router
 
 # Configure basic logging
@@ -9,8 +9,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
 
 app = FastAPI(
-    title=settings.PROJECT_NAME,
-    version=settings.VERSION,
+    title=PROJECT_NAME,
+    version=VERSION,
 )
 
 @app.exception_handler(Exception)
@@ -25,4 +25,4 @@ async def global_exception_handler(request: Request, exc: Exception):
 def health_check():
     return {"status": "ok"}
 
-app.include_router(api_router, prefix=settings.API_V1_STR)
+app.include_router(api_router, prefix=API_V1_STR)

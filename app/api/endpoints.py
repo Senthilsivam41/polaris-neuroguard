@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Dict, Any, List, Tuple, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from app.core.simulation import SimulationEngine, Vector2D, EnvironmentStorm, PRESET_STORMS, Iceberg
+from app.core.simulation import execute_turn, Vector2D, EnvironmentStorm, PRESET_STORMS, Iceberg
 
 router = APIRouter()
 
@@ -119,7 +119,7 @@ def evaluate_decision(payload: EvaluateDecisionRequest):
         if storm_name in PRESET_STORMS:
             storms_list.append(PRESET_STORMS[storm_name])
             
-    # Convert payload structures to core SimulationEngine formats
+    # Convert payload structures to core simulation formats
     core_intent = Vector2D(
         magnitude=payload.intent_vector.magnitude,
         heading_degrees=payload.intent_vector.heading_degrees
@@ -130,8 +130,8 @@ def evaluate_decision(payload: EvaluateDecisionRequest):
         for ib in payload.custom_icebergs:
             core_custom_icebergs.append(Iceberg(name=ib.name, x=ib.x, y=ib.y, radius=ib.radius))
             
-    # Execute step simulation
-    result = SimulationEngine.execute_turn(
+    # Execute step simulation via modular function
+    result = execute_turn(
         current_x=current_x,
         current_y=current_y,
         intent_v=core_intent,
@@ -142,27 +142,21 @@ def evaluate_decision(payload: EvaluateDecisionRequest):
         custom_opposing_pairs=payload.custom_opposing_pairs
     )
     
-    threat_names = [iceberg.name for iceberg in result["collision_threats"]]
+    threat_names = [ib.name for ib in result["collision_threats"]]
+    deadlocks = result["deadlocks"]
     
-    # Build HITL Interception block if deadlock active or collision predicted
-    requires_hitl = False
-    hitl_reason = ""
-    
-    if result["deadlocks"]:
-        requires_hitl = True
-        deadlock_desc = ", ".join([f"{p[0]} & {p[1]}" for p in result["deadlocks"]])
-        hitl_reason += f"Active logical deadlocks: {deadlock_desc}. "
-        
-    if threat_names:
-        requires_hitl = True
-        threats_desc = ", ".join(threat_names)
-        hitl_reason += f"Imminent collision threat with: {threats_desc}. "
-        
+    # ponytail: simplified HITL check and reasoning construction
     hitl_data = None
-    if requires_hitl:
+    if deadlocks or threat_names:
+        reasons = []
+        if deadlocks:
+            reasons.append(f"Active logical deadlocks: {', '.join(f'{p[0]} & {p[1]}' for p in deadlocks)}.")
+        if threat_names:
+            reasons.append(f"Imminent collision threat with: {', '.join(threat_names)}.")
+        
         hitl_data = HITLInterceptionData(
             requires_intervention=True,
-            reason=hitl_reason.strip(),
+            reason=" ".join(reasons),
             telemetry_snapshot={
                 "current_position": {"x": current_x, "y": current_y},
                 "resultant_vector": {
@@ -170,7 +164,7 @@ def evaluate_decision(payload: EvaluateDecisionRequest):
                     "heading_degrees": result["resultant_vector"].heading_degrees
                 },
                 "angular_drift_delta": result["angular_drift_delta"],
-                "deadlocks": result["deadlocks"],
+                "deadlocks": deadlocks,
                 "threats": threat_names
             }
         )
@@ -188,7 +182,7 @@ def evaluate_decision(payload: EvaluateDecisionRequest):
             },
             "actual_burn_rate": result["actual_burn_rate"],
             "angular_drift_delta": result["angular_drift_delta"],
-            "deadlocks": result["deadlocks"],
+            "deadlocks": deadlocks,
             "threats": threat_names
         })
         
@@ -207,7 +201,7 @@ def evaluate_decision(payload: EvaluateDecisionRequest):
             angular_drift_delta=result["angular_drift_delta"]
         ),
         drift_warning=drift_warning,
-        deadlocks=result["deadlocks"],
+        deadlocks=deadlocks,
         collision_threats=threat_names,
         hitl_interception_data=hitl_data
     )
