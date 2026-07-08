@@ -15,42 +15,94 @@ class RiskTolerance(str, Enum):
     AGGRESSIVE = "Aggressive"
 
 class AnchorGoal(BaseModel):
-    title: str = Field(..., description="The title of the strategic goal")
-    target_timeline_months: int = Field(..., description="Target timeline in months", gt=0)
-    budget_limit_usd: float = Field(..., description="Strategic budget limit in USD", gt=0)
-    reliability_target_sla: float = Field(..., description="Target reliability SLA", ge=0.0, le=100.0)
+    title: str = Field(
+        ..., 
+        description="The title of the strategic goal",
+        examples=["Migrate Core Infrastructure"]
+    )
+    target_timeline_months: int = Field(
+        ..., 
+        description="Target timeline in months", 
+        gt=0,
+        examples=[18]
+    )
+    budget_limit_usd: float = Field(
+        ..., 
+        description="Strategic budget limit in USD", 
+        gt=0.0,
+        examples=[5000000.0]
+    )
+    reliability_target_sla: float = Field(
+        ..., 
+        description="Target reliability SLA (0.0 to 100.0)", 
+        ge=0.0, 
+        le=100.0,
+        examples=[99.95]
+    )
 
-class CTOProfile(BaseModel):
-    user_id: str = Field(..., description="The unique ID of the user")
-    role: str = Field(..., description="The role of the user")
-    company_scale: str = Field(..., description="The scale of the company")
-    industry: str = Field(..., description="The industry of the company")
+class UserProfile(BaseModel):
+    user_id: str = Field(
+        ..., 
+        description="The unique ID of the user",
+        examples=["user_123"]
+    )
+    role: str = Field(
+        ..., 
+        description="The role of the user",
+        examples=["Chief Technology Officer"]
+    )
+    company_scale: str = Field(
+        ..., 
+        description="The scale of the company",
+        examples=["Enterprise"]
+    )
+    industry: str = Field(
+        ..., 
+        description="The industry of the company",
+        examples=["Maritime Logistics"]
+    )
     anchor_goal: AnchorGoal = Field(..., description="The registered anchor goal")
-    risk_tolerance: RiskTolerance = Field(..., description="Risk tolerance setting")
+    risk_tolerance: RiskTolerance = Field(
+        ..., 
+        description="Risk tolerance setting",
+        examples=["Balanced"]
+    )
 
 
 # 2. Schemas for Decision Evaluation
 class Vector2DModel(BaseModel):
-    magnitude: float
-    heading_degrees: float
+    magnitude: float = Field(..., description="Speed or magnitude of the vector", examples=[10.0])
+    heading_degrees: float = Field(..., description="Direction in degrees from positive Y-axis (0-360°)", examples=[0.0])
 
 class IcebergModel(BaseModel):
-    name: str
-    x: float
-    y: float
-    radius: float = 100.0
+    name: str = Field(..., description="The name of the iceberg constraint", examples=["Custom Budget Freeze"])
+    x: float = Field(..., description="X coordinate of the iceberg center", examples=[-100.0])
+    y: float = Field(..., description="Y coordinate of the iceberg center", examples=[400.0])
+    radius: float = Field(100.0, description="The safety boundary radius around the iceberg", examples=[100.0])
 
 class EvaluateDecisionRequest(BaseModel):
-    simulation_id: str = Field(..., description="The unique simulation session ID")
-    intent_vector: Vector2DModel = Field(..., description="The CTO's intentional velocity and direction")
-    declared_constraints: List[str] = Field(default_factory=list, description="Active constraints declared by CTO")
-    active_storms: List[str] = Field(default_factory=list, description="Names of active environmental storms")
-    custom_icebergs: Optional[List[IcebergModel]] = Field(None, description="Optional custom icebergs")
-    custom_opposing_pairs: Optional[List[Tuple[str, str]]] = Field(None, description="Optional custom opposing constraint pairs")
+    simulation_id: str = Field(
+        ..., 
+        description="The unique simulation session ID returned on registration",
+        examples=["64afce2a-7f67-4307-9b63-4a5491966940"]
+    )
+    intent_vector: Vector2DModel = Field(..., description="The User's intentional velocity and direction")
+    declared_constraints: List[str] = Field(
+        default_factory=list, 
+        description="Active constraints declared by the user",
+        examples=[["RIGID_TIMELINE", "FREEZE_HEADCOUNT"]]
+    )
+    active_storms: List[str] = Field(
+        default_factory=list, 
+        description="Names of active environmental storms (e.g. 'Category 4 Cyclone')",
+        examples=[["Category 4 Cyclone"]]
+    )
+    custom_icebergs: Optional[List[IcebergModel]] = Field(None, description="Optional custom icebergs to inject")
+    custom_opposing_pairs: Optional[List[Tuple[str, str]]] = Field(None, description="Optional custom opposing constraint pairs to evaluate")
 
 class TelemetryModel(BaseModel):
     current_position: Dict[str, float] = Field(..., description="New position coordinates (x, y)")
-    intent_vector: Vector2DModel = Field(..., description=" CTO intentional vector")
+    intent_vector: Vector2DModel = Field(..., description="User intentional vector")
     resultant_vector: Vector2DModel = Field(..., description="Resultant velocity vector after storms and deadlocks")
     actual_burn_rate: float = Field(..., description="Burn-rate cost for this turn")
     angular_drift_delta: float = Field(..., description="Angular difference between intent and reality in degrees")
@@ -74,13 +126,17 @@ sessions: Dict[str, Dict[str, Any]] = {}
 sessions_lock = threading.Lock()
 
 
-@router.get("/status")
+@router.get("/status", summary="Get API router status")
 def get_status():
+    """Returns the initialization status of the simulation API router."""
     return {"status": "ready"}
 
 
-@router.post("/simulation/register")
-def register_simulation(profile: CTOProfile):
+@router.post("/simulation/register", summary="Register new user profile and initialize simulation")
+def register_simulation(profile: UserProfile):
+    """Registers a user profile containing role, scale, industry, anchor goals, and risk tolerance.
+    Initializes simulation coordinates at (0,0) with destination targets set.
+    """
     sim_id = str(uuid.uuid4())
     
     with sessions_lock:
@@ -95,12 +151,21 @@ def register_simulation(profile: CTOProfile):
     return {
         "simulation_id": sim_id,
         "quantum_mountain_coordinates": {"x": 0.0, "y": 1000.0},
-        "cto_profile": profile
+        "user_profile": profile
     }
 
 
-@router.post("/simulation/evaluate-decision", response_model=EvaluateDecisionResponse)
+@router.post(
+    "/simulation/evaluate-decision", 
+    response_model=EvaluateDecisionResponse,
+    summary="Evaluate decision step telemetry, deadlocks, and path collisions"
+)
 def evaluate_decision(payload: EvaluateDecisionRequest):
+    """Executes a single simulation step based on the user's steering intent, active constraints, and storms.
+    
+    Runs real-time logical deadlock checking and capsule path collision projection. Returns full telemetry
+    and registers human-in-the-loop (HITL) alerts if failure thresholds are violated.
+    """
     sim_id = payload.simulation_id
     
     with sessions_lock:

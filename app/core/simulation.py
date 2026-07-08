@@ -156,7 +156,7 @@ def check_trajectory_collision(
             diff_y = iceberg.y - closest_y
             dist_sq = diff_x * diff_x + diff_y * diff_y
             
-        if dist_sq <= iceberg.radius * iceberg.radius:
+        if dist_sq <= iceberg.radius * iceberg.radius + 1e-7:
             intersecting_icebergs.append(iceberg)
             
     return intersecting_icebergs
