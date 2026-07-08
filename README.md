@@ -1,6 +1,6 @@
 # Polaris Neuro Guard 🧭🤖
 
-> **A Neuro-Symbolic Multi-Agent Strategic Drift Guardrail for CTO Decision-Making**
+> **A Neuro-Symbolic Multi-Agent Strategic Drift Guardrail for Strategic Decision-Making**
 
 Polaris Neuro Guard is a strategic simulation platform built with Python and FastAPI. It models an enterprise initiative ("The Ship") steering toward a strategic objective ("The Mountain") through systemic constraints ("The Icebergs"). The platform calculates and prevents strategic drift under macro-environmental volatility using vector mechanics and deadlock detection.
 
@@ -40,6 +40,12 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 The server will start at `http://127.0.0.1:8000`. You can verify the setup by visiting `http://127.0.0.1:8000/health`.
+
+### 📖 API Interactive Documentation
+
+Once the server is running, the interactive Swagger UI and ReDoc documentation are automatically published and accessible via:
+* **Interactive Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) (View schemas, endpoints, and execute sample inputs directly in the browser)
+* **ReDoc Documentation**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc) (Clean, structured static documentation interface)
 
 ## 🪵 Ponytail Audit: Optimization Log
 
