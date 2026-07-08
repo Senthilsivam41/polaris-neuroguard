@@ -1,0 +1,59 @@
+name: Publish API Documentation
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  deploy-docs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate API Specs & Static Docs
+        run: |
+          mkdir public
+          python -c "import json; from app.main import app; print(json.dumps(app.openapi()))" > public/openapi.json
+          
+          # Create redoc index.html page referencing openapi.json
+          cat << 'EOF' > public/index.html
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <title>Polaris Neuro Guard API Docs</title>
+              <meta charset="utf-8"/>
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+              <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
+              <style>
+                body { margin: 0; padding: 0; }
+              </style>
+            </head>
+            <body>
+              <redoc spec-url="openapi.json"></redoc>
+              <script src="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js"> </script>
+            </body>
+          </html>
+          EOF
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
