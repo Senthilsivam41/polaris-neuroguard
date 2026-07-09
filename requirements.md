@@ -39,12 +39,27 @@ The goal of Polaris Neuro Guard is to provide an enterprise-grade simulation eng
   * **Macroeconomic Shock (e.g., Surging Petrol Prices):** Modeled as a financial friction scalar that multiplies operational burn-rates.
 
 ### 2.3 Multi-Agent Simulation Core (ADK 2.0 Graph Workflow)
-* **FR-3.1:** The simulation loop must be orchestrated as a cyclic graph workflow using Google Agent Development Kit (ADK) 2.0 primitives.
-* **FR-3.2:** State execution must be distributed among four specialized backend agent nodes interacting via the Agent-to-Agent (A2A) network protocol:
-  * **Goal Analyzer Agent:** Evaluates human inputs against the profile boundary configurations.
-  * **Environmental Weather Station Agent:** Dynamically applies vector offsets based on active environmental shock factors.
-  * **Path Simulator Agent:** Computes spatial coordinates using 2D vector mathematics.
-  * **Constraint Conflict Predictor Agent:** Synthesizes symbolic logical rules to check for contradictory, self-blocking operational constraints.
+* **FR-3.1:** The simulation loop **must** be constructed as a `WorkflowAgent` graph (`google.adk.agents.WorkflowAgent`). Direct function-to-function calls between the four domains below are **not permitted** — each domain must be a distinct graph node reachable only via a defined edge.
+* **FR-3.2:** The graph must contain exactly four nodes, each independently unit-testable in isolation from the graph:
+
+  | Node | ADK primitive | Responsibility |
+  |---|---|---|
+  | **Goal Analyzer Agent** | `LlmAgent` | Evaluates the user's declared intent vector against the registered `anchor_goal` and `risk_tolerance`. Produces a qualitative assessment that can flag intent that is strategically inconsistent with the stated goal (e.g. burning budget headroom to preserve heading). |
+  | **Environmental Weather Station Agent** | `FunctionTool` wrapping `calculate_resultant_vector` | Deterministic — applies active storm vectors. Stays a pure function/tool. |
+  | **Path Simulator Agent** | `FunctionTool` wrapping `execute_turn` position/burn-rate math | Deterministic — advances coordinates, computes burn rate, and executes look-ahead checks. |
+  | **Constraint Conflict Predictor Agent** | `LlmAgent` (with `FunctionTool` sub-call to `check_logical_deadlocks` for static pairs) | Runs SMT symbolic checks, then reasons over *novel* constraint phrasings that static pair lists would fail to catch. |
+
+* **FR-3.3:** Edges must route as follows, matching the intended data dependency flow:
+  ```
+  ("start", "GoalAnalyzer")
+  ("GoalAnalyzer", "ConstraintPredictor")
+  ("ConstraintPredictor", "WeatherStation", "no_deadlock")
+  ("ConstraintPredictor", "PathSimulator", "deadlock")   # zero-velocity path per FR-5.2
+  ("WeatherStation", "PathSimulator")
+  ("PathSimulator", "end")
+  ```
+* **FR-3.4:** Each node must define a `RetryConfig` (e.g., `RetryConfig(max_attempts=3)`), and node implementations must **not** catch bare `Exception` or `BaseException` internally. All exceptions must propagate up to the framework to allow automatic retries and HITL interruptions to function correctly.
+* **FR-3.5:** The four nodes must be independently exposable via A2A (`google.adk.a2a.to_a2a(agent)`), enabling swapping of local nodes for remote agents.
 
 ### 2.4 Mathematical Drift & Trajectory Calculations
 * **FR-4.1:** The system must compute the actual trajectory using 2D vector mechanics, executing vector addition of human strategic intent ($\vec{V}_a$) and environmental storm displacement ($\vec{V}_s$):
@@ -60,8 +75,11 @@ $$\sigma = |\theta_g - \theta_a|$$
 ### 2.5 SMT Constraint Verification & Human-in-the-Loop (HITL) Interception
 * **FR-5.1:** The Constraint Conflict Predictor must flag an immediate system deadlock if a user introduces mutually exclusive parameter configurations (e.g., setting a `RIGID_TIMELINE` boundary while simultaneously declaring a `FREEZE_HEADCOUNT` constraint during a storm event).
 * **FR-5.2:** If a logical deadlock is detected, the engine must immediately drop the effective intent velocity magnitude ($v_a$) to $0$, representing an engine stall, while allowing environmental vectors to continue displacing the coordinates.
-* **FR-5.3:** The system must calculate a 3-turn forward trajectory projection. If the look-ahead coordinates fall within the danger radius ($R$) of a pre-configured constraint obstacle (Iceberg), the system must execute an ADK 2.0 native Human-in-the-Loop intercept.
-* **FR-5.4:** The HITL trigger must pause graph execution, preserve memory state, block auto-progression, and yield a structured JSON analysis payload detailing the precise mathematical contradiction for user remediation.
+* **FR-5.3:** The system must calculate a 3-turn forward trajectory projection. If the look-ahead coordinates fall within the danger radius ($R$) of a pre-configured constraint obstacle (Iceberg), the Path Simulator node **must** raise `NodeInterruptedError` to intercept progress.
+* **FR-5.4:** On `NodeInterruptedError`:
+  1. The ADK 2.0 runtime must automatically persist the graph's session state (current node, position, burn rate, deadlock/collision context).
+  2. The API layer must expose a separate resume endpoint `POST /simulation/{simulation_id}/resume` that accepts a human decision payload and re-enters the graph at the paused node. `POST /simulation/evaluate-decision` must be blocked and return a paused state if invoked while the simulation is interrupted.
+  3. The structured JSON payload returned at pause time must contain `reason` and `telemetry_snapshot` diagnostic states.
 
 ---
 
@@ -69,10 +87,10 @@ $$\sigma = |\theta_g - \theta_a|$$
 
 ### 3.1 Performance & Latency
 * **NFR-1.1:** The backend API must process a single evaluation turn—including vector addition, lookup checks, and collision projections—in less than 200ms under standard execution conditions.
-* **NFR-1.2:** Agent-to-Agent graph state synchronization via ADK 2.0 must maintain low-latency thread safety within the local execution environment.
+* **NFR-1.2:** All four graph nodes must be `to_a2a`-exposable, and execution under a local co-located graph and an A2A-swapped remote node configuration must yield identical telemetry output.
 
 ### 3.2 Extensibility & Architecture Constraints
-* **NFR-2.1:** The system code must follow a strict modular design pattern to seamlessly integrate with frontend canvas wrappers (Three.js or React Flow) without modifying the underlying vector logic.
+* **NFR-2.1:** The system code must follow a strict modular design pattern to seamlessly integrate with frontend canvas wrappers without modifying the underlying vector logic.
 * **NFR-2.2:** The architecture must strictly honor YAGNI (You Ain't Gonna Need It) principles, eliminating bloated boilerplate code in favor of native Python libraries and FastAPI dependencies.
 
 ### 3.3 Data Management
@@ -83,8 +101,7 @@ $$\sigma = |\theta_g - \theta_a|$$
 ## 4. Technical Stack Requirements
 
 * **Language Runtime:** Python 3.11+
-* **Framework Core:** Google Agent Development Kit (ADK) 2.0 Stable Release
-* **Development Environment:** Antigravity CLI Tooling (`agents-cli`)
-* **AI Core Models:** Codex Plus Integration Layer
-* **API Framework:** FastAPI with Pydantic v2 validation components
-* **Mathematical Operations:** Native Python `math` module (vector coordinate mapping, geometric parsing)
+* **Framework Core:** `google-adk` package pinned with compatible-release operator against 2.0 (e.g., `google-adk[a2a]~=2.0`).
+* **API Framework:** FastAPI with Pydantic v2 validation components.
+* **AI Core Models:** Gemini 2.x family models for LLM-based agent nodes.
+* **Mathematical Operations:** Native Python `math` module (vector coordinate mapping, geometric parsing).
