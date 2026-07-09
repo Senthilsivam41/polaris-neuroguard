@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import PROJECT_NAME, VERSION, API_V1_STR
 from app.api.endpoints import router as api_router
 
@@ -36,6 +37,15 @@ logger = logging.getLogger("app")
 app = FastAPI(
     title=PROJECT_NAME,
     version=VERSION,
+)
+
+# Configure CORS Middleware for Frontend integration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.exception_handler(Exception)

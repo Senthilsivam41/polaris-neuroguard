@@ -164,3 +164,120 @@ class TestPolarisAPI(unittest.TestCase):
         }
         response = self.client.post("/api/v1/simulation/evaluate-decision", json=eval_payload)
         self.assertEqual(response.status_code, 404)
+
+    def test_get_simulation_history_success(self):
+        """Verify that get_simulation_history endpoint returns full historical timeline."""
+        reg_payload = {
+            "user_id": "test_history_user",
+            "role": "CTO",
+            "company_scale": "Scaleup",
+            "industry": "Logistics",
+            "anchor_goal": {
+                "title": "History Check",
+                "target_timeline_months": 6,
+                "budget_limit_usd": 250000.0,
+                "reliability_target_sla": 99.0
+            },
+            "risk_tolerance": "Conservative"
+        }
+        reg_resp = self.client.post("/api/v1/simulation/register", json=reg_payload)
+        sim_id = reg_resp.json()["simulation_id"]
+
+        eval_payload = {
+            "simulation_id": sim_id,
+            "intent_vector": {"magnitude": 10.0, "heading_degrees": 0.0},
+            "declared_constraints": [],
+            "active_storms": []
+        }
+        self.client.post("/api/v1/simulation/evaluate-decision", json=eval_payload)
+
+        history_resp = self.client.get(f"/api/v1/simulation/{sim_id}/history")
+        self.assertEqual(history_resp.status_code, 200)
+        data = history_resp.json()
+        self.assertEqual(data["simulation_id"], sim_id)
+        self.assertEqual(data["total_turns_executed"], 1)
+        self.assertEqual(len(data["history"]), 1)
+        
+        step_log = data["history"][0]
+        self.assertEqual(step_log["turn_number"], 1)
+        self.assertEqual(step_log["telemetry_snapshot"]["current_position"]["y"], 10.0)
+        self.assertEqual(step_log["applied_decision"]["intent_vector"]["magnitude"], 10.0)
+
+    def test_get_simulation_history_not_found(self):
+        """Verify that get_simulation_history returns 404 for invalid simulation ID."""
+        response = self.client.get(f"/api/v1/simulation/nonexistent-uuid/history")
+        self.assertEqual(response.status_code, 404)
+
+    def test_inject_storm_success(self):
+        """Verify successful injection and subsequent use of custom environmental storms."""
+        reg_payload = {
+            "user_id": "test_storm_user",
+            "role": "CTO",
+            "company_scale": "Scaleup",
+            "industry": "Logistics",
+            "anchor_goal": {
+                "title": "Storm Check",
+                "target_timeline_months": 6,
+                "budget_limit_usd": 250000.0,
+                "reliability_target_sla": 99.0
+            },
+            "risk_tolerance": "Conservative"
+        }
+        reg_resp = self.client.post("/api/v1/simulation/register", json=reg_payload)
+        sim_id = reg_resp.json()["simulation_id"]
+
+        storm_payload = {
+            "storm_type": "Meteorological",
+            "name": "Custom Solar Flare",
+            "magnitude": 8.0,
+            "heading_degrees": 180.0
+        }
+        inject_resp = self.client.post(f"/api/v1/simulation/{sim_id}/inject-storm", json=storm_payload)
+        self.assertEqual(inject_resp.status_code, 200)
+        self.assertEqual(inject_resp.json()["status"], "success")
+
+        eval_payload = {
+            "simulation_id": sim_id,
+            "intent_vector": {"magnitude": 10.0, "heading_degrees": 0.0},
+            "declared_constraints": [],
+            "active_storms": ["Custom Solar Flare"]
+        }
+        response = self.client.post("/api/v1/simulation/evaluate-decision", json=eval_payload)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        
+        self.assertAlmostEqual(data["telemetry"]["resultant_vector"]["magnitude"], 2.0)
+        self.assertAlmostEqual(data["telemetry"]["resultant_vector"]["heading_degrees"], 0.0)
+
+    def test_inject_storm_validation_error(self):
+        """Verify dynamic storm parameter constraints check (e.g. invalid heading)."""
+        reg_payload = {
+            "user_id": "test_storm_user",
+            "role": "CTO",
+            "company_scale": "Scaleup",
+            "industry": "Logistics",
+            "anchor_goal": {"title": "Storm Validate", "target_timeline_months": 6, "budget_limit_usd": 250000.0, "reliability_target_sla": 99.0},
+            "risk_tolerance": "Conservative"
+        }
+        reg_resp = self.client.post("/api/v1/simulation/register", json=reg_payload)
+        sim_id = reg_resp.json()["simulation_id"]
+
+        storm_payload = {
+            "storm_type": "Meteorological",
+            "name": "Custom Solar Flare",
+            "magnitude": 8.0,
+            "heading_degrees": 380.0  # Invalid (> 360)
+        }
+        response = self.client.post(f"/api/v1/simulation/{sim_id}/inject-storm", json=storm_payload)
+        self.assertEqual(response.status_code, 422)
+
+    def test_inject_storm_not_found(self):
+        """Verify inject-storm returns 404 for invalid simulation ID."""
+        storm_payload = {
+            "storm_type": "Meteorological",
+            "name": "Custom Solar Flare",
+            "magnitude": 8.0,
+            "heading_degrees": 180.0
+        }
+        response = self.client.post("/api/v1/simulation/nonexistent-uuid/inject-storm", json=storm_payload)
+        self.assertEqual(response.status_code, 404)
