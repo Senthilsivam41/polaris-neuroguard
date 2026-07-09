@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Tuple, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from app.core.simulation import execute_turn, Vector2D, EnvironmentStorm, PRESET_STORMS, Iceberg
+from app.core.config import BASE_BURN_RATE
 
 router = APIRouter()
 
@@ -201,7 +202,7 @@ def evaluate_decision(payload: EvaluateDecisionRequest):
         current_y=current_y,
         intent_v=core_intent,
         active_storms=storms_list,
-        base_burn_rate=100.0,
+        base_burn_rate=BASE_BURN_RATE,
         declared_constraints=payload.declared_constraints,
         custom_icebergs=core_custom_icebergs,
         custom_opposing_pairs=payload.custom_opposing_pairs
