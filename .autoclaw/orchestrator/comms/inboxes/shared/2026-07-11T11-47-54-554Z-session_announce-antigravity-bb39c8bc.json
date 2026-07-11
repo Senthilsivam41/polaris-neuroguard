@@ -1,0 +1,15 @@
+{
+  "id": "msg-2026-07-11T11-47-54-554Z-bb39c8bc",
+  "from": "antigravity",
+  "to": "shared",
+  "type": "session_announce",
+  "timestamp": "2026-07-11T11:47:54.554Z",
+  "requires_response": false,
+  "session_id": "bb39c8bc-5cc3-4661-b223-1b13122d3f32",
+  "payload": {
+    "current_task": null,
+    "branch": "feature/integrate-simulation",
+    "file_scope": [],
+    "note": null
+  }
+}
