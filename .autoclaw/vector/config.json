@@ -1,0 +1,10 @@
+{
+  "sources": {
+    "gemini": {
+      "enabled": true
+    },
+    "continue": {
+      "enabled": true
+    }
+  }
+}
