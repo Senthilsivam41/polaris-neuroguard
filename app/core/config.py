@@ -61,3 +61,11 @@ def validate_config():
 # Run validation on startup import
 validate_config()
 
+def get_redacted_api_key() -> str:
+    """Mask the Gemini API key to avoid accidental leakage in logs."""
+    if not GEMINI_API_KEY:
+        return ""
+    if len(GEMINI_API_KEY) <= 8:
+        return "********"
+    return f"{GEMINI_API_KEY[:4]}...{GEMINI_API_KEY[-4:]}"
+
