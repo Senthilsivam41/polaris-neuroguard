@@ -1,0 +1,35 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.venv_test/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+.env
+
+# SQLite Databases & transaction logs
+*.sqlite
+*.db
+*.db-wal
+*.db-shm
+
+# AutoClaw orchestrator transient runtime files
+.autoclaw/orchestrator/audit/
+.autoclaw/orchestrator/comms/heartbeats/
+.autoclaw/orchestrator/comms/beacons/
+.autoclaw/orchestrator/comms/claims/
+.autoclaw/orchestrator/comms/inboxes/
+.autoclaw/orchestrator/comms/agents/_dispatch/
+.autoclaw/orchestrator/comms/loop-journal.jsonl
+.autoclaw/orchestrator/comms/loop-state.json
+.autoclaw/orchestrator/comms/supervisor.lock.json
+.autoclaw/orchestrator/board.json
+.autoclaw/orchestrator/board.md
+.autoclaw/orchestrator/reconcile-report.json
+.autoclaw/orchestrator/sprints/
+.autoclaw/autobuild/
+.autoclaw/orchestrator/comms/cluster-map.json
+.autoclaw/orchestrator/comms/registry.json

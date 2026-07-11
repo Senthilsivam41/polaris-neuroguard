@@ -1,0 +1,6 @@
+{
+  "provider": "ollama",
+  "model": "nomic-embed-text:latest",
+  "dimension": 768,
+  "resolvedAt": "2026-07-11T11:25:35.217Z"
+}

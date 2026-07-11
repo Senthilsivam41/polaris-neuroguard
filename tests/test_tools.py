@@ -95,3 +95,65 @@ class TestSimulationTools(unittest.IsolatedAsyncioTestCase):
         res = await position_advancer_tool.run_async(args=args, tool_context=self.ctx)
         self.assertAlmostEqual(res.x, 20.0, places=4)
         self.assertAlmostEqual(res.y, 20.0, places=4)
+
+    async def test_invalid_tool_inputs(self):
+        """Verify that FunctionTools reject invalid domain inputs."""
+        from pydantic import ValidationError
+
+        # 1. Negative intent vector magnitude
+        args_neg_mag = {
+            "intent_vector": {"magnitude": -10.0, "heading_degrees": 0.0},
+            "active_storms": []
+        }
+        with self.assertRaises(ValidationError):
+            await resultant_vector_tool.run_async(args=args_neg_mag, tool_context=self.ctx)
+
+        # 2. Invalid heading degrees (out of 0-360 range)
+        args_invalid_heading = {
+            "intent_vector": {"magnitude": 10.0, "heading_degrees": 380.0},
+            "active_storms": []
+        }
+        with self.assertRaises(ValidationError):
+            await resultant_vector_tool.run_async(args=args_invalid_heading, tool_context=self.ctx)
+
+        # 3. Negative iceberg radius
+        args_neg_radius = {
+            "start_x": 0.0,
+            "start_y": 0.0,
+            "resultant_vector": {"magnitude": 10.0, "heading_degrees": 0.0},
+            "custom_icebergs": [
+                {
+                    "name": "Invalid Iceberg",
+                    "x": 0.0,
+                    "y": 10.0,
+                    "radius": -5.0
+                }
+            ]
+        }
+        with self.assertRaises(ValidationError):
+            await trajectory_collision_tool.run_async(args=args_neg_radius, tool_context=self.ctx)
+
+        # 4. Negative friction multiplier
+        args_neg_friction = {
+            "base_burn_rate": 100.0,
+            "active_storms": [
+                {
+                    "storm_type": "Economic",
+                    "name": "Bad Storm",
+                    "magnitude": 0.0,
+                    "heading_degrees": 0.0,
+                    "cost_friction_multiplier": -1.5
+                }
+            ]
+        }
+        with self.assertRaises(ValidationError):
+            await burn_rate_tool.run_async(args=args_neg_friction, tool_context=self.ctx)
+
+        # 5. Negative base burn rate (ValueError inside tool function)
+        args_neg_burn = {
+            "base_burn_rate": -100.0,
+            "active_storms": []
+        }
+        with self.assertRaises(ValueError):
+            await burn_rate_tool.run_async(args=args_neg_burn, tool_context=self.ctx)
+

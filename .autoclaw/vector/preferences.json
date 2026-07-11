@@ -1,0 +1,13 @@
+{
+  "preferredPatterns": [
+    "Kept (git commit): 82: ### Task N: [Component Name]"
+  ],
+  "avoided": [
+    "Avoid large speculative rewrites that are not backed by tests.",
+    "Avoid adding new dependencies when an existing project utility already covers the need."
+  ],
+  "tools": [
+    "Gemini CLI"
+  ],
+  "updatedAt": "2026-07-11T11:25:36.337Z"
+}

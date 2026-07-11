@@ -73,4 +73,25 @@ class TestStateValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_state_transition(old_state, new_state_invalid)
 
+    def test_state_serialization_and_compatibility(self):
+        """Verify that state schema serializes/deserializes correctly and handles version compatibility."""
+        state = SimulationStateSchema(
+            simulation_id="test_sim",
+            goal_contract_version="2.0.0",
+            intent_vector=Vector2D(magnitude=15.0, heading_degrees=45.0)
+        )
+        
+        # Serialize to dict (simulates database persistence)
+        serialized = state.model_dump()
+        self.assertEqual(serialized["simulation_id"], "test_sim")
+        self.assertEqual(serialized["goal_contract_version"], "2.0.0")
+        self.assertEqual(serialized["intent_vector"]["magnitude"], 15.0)
+        
+        # Deserialize from dict (simulates load from database)
+        deserialized = SimulationStateSchema.model_validate(serialized)
+        self.assertEqual(deserialized.simulation_id, "test_sim")
+        self.assertEqual(deserialized.goal_contract_version, "2.0.0")
+        self.assertEqual(deserialized.intent_vector.magnitude, 15.0)
+
+
 

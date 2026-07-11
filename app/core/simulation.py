@@ -162,6 +162,21 @@ def check_trajectory_collision(
     return intersecting_icebergs
 
 
+
+def calculate_actual_burn_rate(base_burn_rate: float, storms: List[EnvironmentStorm]) -> float:
+    """Calculate final operational burn-rate per turn applying macroeconomic surcharges."""
+    friction_mult = 1.0
+    for storm in storms:
+        friction_mult *= storm.cost_friction_multiplier
+    return base_burn_rate * friction_mult
+
+
+def advance_position(current_x: float, current_y: float, resultant_v: Vector2D) -> Tuple[float, float]:
+    """Advance coordinates based on the resultant vector components."""
+    dx, dy = resultant_v.to_cartesian()
+    return current_x + dx, current_y + dy
+
+
 def execute_turn(
     current_x: float,
     current_y: float,
@@ -185,11 +200,9 @@ def execute_turn(
         
     # 2. Compute resultant vector
     resultant_v = calculate_resultant_vector(resolved_intent, active_storms)
-    dx, dy = resultant_v.to_cartesian()
     
-    # 3. Advance ship position
-    new_x = current_x + dx
-    new_y = current_y + dy
+    # 3. Advance ship position using shared logic
+    new_x, new_y = advance_position(current_x, current_y, resultant_v)
     
     # 4. Check for collision threats along the path (look-ahead)
     all_icebergs = DEFAULT_ICEBERGS + (custom_icebergs or [])
@@ -197,11 +210,8 @@ def execute_turn(
         current_x, current_y, resultant_v, all_icebergs
     )
     
-    # 5. Calculate financial cost of this turn
-    friction_mult = 1.0
-    for storm in active_storms:
-        friction_mult *= storm.cost_friction_multiplier
-    actual_burn_rate = base_burn_rate * friction_mult
+    # 5. Calculate financial cost of this turn using shared logic
+    actual_burn_rate = calculate_actual_burn_rate(base_burn_rate, active_storms)
     
     # 6. Quantify absolute angular drift delta
     theta_a = intent_v.heading_degrees
@@ -217,3 +227,4 @@ def execute_turn(
         "deadlocks": active_deadlocks,
         "collision_threats": collisions
     }
+

@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "matrix": {
+    "generatedAt": "2026-07-11T11:25:36.337Z",
+    "totalSessions": 213,
+    "byTool": [
+      {
+        "tool": "Gemini CLI",
+        "project": "(all)",
+        "projectLabel": "(all)",
+        "sessions": 211,
+        "shipped": 2,
+        "discarded": 0,
+        "keptSignals": 2,
+        "estTokens": 2151919,
+        "shipRate": 0.009478672985781991,
+        "keptPerSession": 0.009478672985781991,
+        "tokensPerKept": 1075959.5
+      },
+      {
+        "tool": "AutoClaw Orchestrator",
+        "project": "(all)",
+        "projectLabel": "(all)",
+        "sessions": 1,
+        "shipped": 0,
+        "discarded": 0,
+        "keptSignals": 0,
+        "estTokens": 2,
+        "shipRate": 0,
+        "keptPerSession": 0,
+        "tokensPerKept": 2
+      },
+      {
+        "tool": "Continue",
+        "project": "(all)",
+        "projectLabel": "(all)",
+        "sessions": 1,
+        "shipped": 0,
+        "discarded": 0,
+        "keptSignals": 0,
+        "estTokens": 782,
+        "shipRate": 0,
+        "keptPerSession": 0,
+        "tokensPerKept": 782
+      }
+    ],
+    "byToolProject": [
+      {
+        "tool": "Gemini CLI",
+        "project": "/Users/sendils/work/repo/adk-2_0/polaris-neuroguard",
+        "projectLabel": "polaris-neuroguard",
+        "sessions": 211,
+        "shipped": 2,
+        "discarded": 0,
+        "keptSignals": 2,
+        "estTokens": 2151919,
+        "shipRate": 0.009478672985781991,
+        "keptPerSession": 0.009478672985781991,
+        "tokensPerKept": 1075959.5
+      },
+      {
+        "tool": "AutoClaw Orchestrator",
+        "project": "/Users/sendils/work/repo/adk-2_0/polaris-neuroguard",
+        "projectLabel": "polaris-neuroguard",
+        "sessions": 1,
+        "shipped": 0,
+        "discarded": 0,
+        "keptSignals": 0,
+        "estTokens": 2,
+        "shipRate": 0,
+        "keptPerSession": 0,
+        "tokensPerKept": 2
+      },
+      {
+        "tool": "Continue",
+        "project": "/Users/sendils/work/repo/adk-2_0/polaris-neuroguard",
+        "projectLabel": "polaris-neuroguard",
+        "sessions": 1,
+        "shipped": 0,
+        "discarded": 0,
+        "keptSignals": 0,
+        "estTokens": 782,
+        "shipRate": 0,
+        "keptPerSession": 0,
+        "tokensPerKept": 782
+      }
+    ]
+  }
+}
