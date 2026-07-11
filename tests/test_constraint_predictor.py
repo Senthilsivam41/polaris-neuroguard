@@ -16,7 +16,7 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
         self.session = Session(id="test_session", app_name="test_app", user_id="test_user")
         self.session.state = {
             "declared_constraints": ["RIGID_TIMELINE", "FREEZE_HEADCOUNT"],
-            "intent_vector": {"magnitude": 10.0, "heading_degrees": 90.0},
+            "intent_vector": Vector2D(magnitude=10.0, heading_degrees=90.0),
             "active_deadlocks": []
         }
         self.ic = InvocationContext(
@@ -28,6 +28,24 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
         import asyncio
         self.ic._event_queue = asyncio.Queue()
         self.ctx = CallbackContext(self.ic, node=constraint_predictor)
+        self.consumer_task = asyncio.create_task(self._consume_event_queue())
+
+    async def asyncTearDown(self):
+        if hasattr(self, "consumer_task"):
+            self.consumer_task.cancel()
+            import asyncio
+            await asyncio.gather(self.consumer_task, return_exceptions=True)
+
+    async def _consume_event_queue(self):
+        while True:
+            try:
+                item = await self.ic._event_queue.get()
+                event, processed = item
+                self.session.events.append(event)
+                if processed:
+                    processed.set()
+            except Exception:
+                break
 
     @patch("google.adk.models.google_llm.Gemini.generate_content_async")
     async def test_static_deadlock_detection(self, mock_generate_content_async):
@@ -51,7 +69,7 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
         # Verify that the callback set the route to deadlock and zeroed the intent magnitude
         self.assertEqual(child_ctx.route, "deadlock")
         self.assertEqual(child_ctx.state["active_deadlocks"], [["RIGID_TIMELINE", "FREEZE_HEADCOUNT"]])
-        self.assertEqual(child_ctx.state["intent_vector"]["magnitude"], 0.0)
+        self.assertEqual(child_ctx.state["intent_vector"].magnitude, 0.0)
 
     @patch("google.adk.models.google_llm.Gemini.generate_content_async")
     async def test_low_confidence_conflict_no_block(self, mock_generate_content_async):
@@ -70,7 +88,7 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
 
         # Reset session state for no deadlocks and non-zero intent
         self.session.state["declared_constraints"] = ["RIGID_TIMELINE", "EXTEND_SCHEDULE"]
-        self.session.state["intent_vector"] = {"magnitude": 10.0, "heading_degrees": 90.0}
+        self.session.state["intent_vector"] = Vector2D(magnitude=10.0, heading_degrees=90.0)
         self.session.state["active_deadlocks"] = []
         self.ctx = CallbackContext(self.ic, node=constraint_predictor)
 
@@ -80,7 +98,7 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(child_ctx.route, "no_deadlock")
         self.assertEqual(child_ctx.state["active_deadlocks"], [])
-        self.assertEqual(child_ctx.state["intent_vector"]["magnitude"], 10.0)
+        self.assertEqual(child_ctx.state["intent_vector"].magnitude, 10.0)
 
     @patch("google.adk.models.google_llm.Gemini.generate_content_async")
     async def test_high_confidence_semantic_deadlock(self, mock_generate_content_async):
@@ -98,7 +116,7 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
         mock_generate_content_async.side_effect = mock_gen
 
         self.session.state["declared_constraints"] = ["RIGID_TIMELINE", "EXTEND_SCHEDULE"]
-        self.session.state["intent_vector"] = {"magnitude": 10.0, "heading_degrees": 90.0}
+        self.session.state["intent_vector"] = Vector2D(magnitude=10.0, heading_degrees=90.0)
         self.session.state["active_deadlocks"] = []
         self.ctx = CallbackContext(self.ic, node=constraint_predictor)
 
@@ -108,4 +126,4 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(child_ctx.route, "deadlock")
         self.assertEqual(child_ctx.state["active_deadlocks"], [["RIGID_TIMELINE", "EXTEND_SCHEDULE"]])
-        self.assertEqual(child_ctx.state["intent_vector"]["magnitude"], 0.0)
+        self.assertEqual(child_ctx.state["intent_vector"].magnitude, 0.0)

@@ -18,24 +18,45 @@ class ConstraintConflictAssessment(BaseModel):
     conflicts: List[ConflictDetail] = Field(default_factory=list, description="List of detected conflicting constraint pairs with evidence and confidence")
 
 async def after_predictor_callback(callback_context: CallbackContext) -> None:
-    assessment = callback_context.output
-    if isinstance(assessment, dict):
-        assessment = ConstraintConflictAssessment.model_validate(assessment)
-    elif not isinstance(assessment, ConstraintConflictAssessment):
+    # 1. Retrieve the last model response from this agent
+    model_text = None
+    for event in reversed(callback_context.session.events):
+        if event.author == "ConstraintPredictor" and event.content:
+            parts = event.content.parts
+            if parts:
+                model_text = "".join(p.text for p in parts if p.text and not p.thought)
+                break
+                
+    # 2. If no text or parsing fails, fallback to checking static tool output in session events
+    if not model_text:
+        await _fallback_static_check(callback_context)
         return
-    
+        
+    try:
+        cleaned_text = model_text.strip()
+        if cleaned_text.startswith("```json"):
+            cleaned_text = cleaned_text[7:]
+        if cleaned_text.endswith("```"):
+            cleaned_text = cleaned_text[:-3]
+        cleaned_text = cleaned_text.strip()
+        
+        assessment = ConstraintConflictAssessment.model_validate_json(cleaned_text)
+    except Exception:
+        await _fallback_static_check(callback_context)
+        return
+
+    # 3. Process the parsed assessment
     deadlocks_list = []
     for c in assessment.conflicts:
-        # High confidence novel conflicts (>= 0.7) or static deadlocks count as active deadlocks
         if c.conflict_type == "static" or c.confidence >= 0.7:
             deadlocks_list.append([c.constraint_a, c.constraint_b])
-    
+            
     # Persist detected deadlocks to session state
     callback_context.state["active_deadlocks"] = deadlocks_list
     
     if assessment.has_deadlock or deadlocks_list:
         callback_context.route = "deadlock"
-        # Drop intentional velocity magnitude to 0 on deadlock
+        callback_context._event_actions.route = "deadlock"
         intent = callback_context.state.get("intent_vector")
         if intent:
             heading = intent.heading_degrees if hasattr(intent, "heading_degrees") else intent.get("heading_degrees", 0.0)
@@ -45,6 +66,30 @@ async def after_predictor_callback(callback_context: CallbackContext) -> None:
             )
     else:
         callback_context.route = "no_deadlock"
+        callback_context._event_actions.route = "no_deadlock"
+
+async def _fallback_static_check(callback_context: CallbackContext) -> None:
+    """Fallback SMT check that scans tool responses in session events for static deadlocks."""
+    deadlocks_list = []
+    for event in callback_context.session.events:
+        for fr in event.get_function_responses():
+            if fr.name == "check_logical_deadlocks_tool" and fr.response:
+                for p1, p2 in fr.response:
+                    deadlocks_list.append([p1, p2])
+    if deadlocks_list:
+        callback_context.state["active_deadlocks"] = deadlocks_list
+        callback_context.route = "deadlock"
+        callback_context._event_actions.route = "deadlock"
+        intent = callback_context.state.get("intent_vector")
+        if intent:
+            heading = intent.heading_degrees if hasattr(intent, "heading_degrees") else intent.get("heading_degrees", 0.0)
+            callback_context.state["intent_vector"] = StateVector2D(
+                magnitude=0.0,
+                heading_degrees=heading
+            )
+    else:
+        callback_context.route = "no_deadlock"
+        callback_context._event_actions.route = "no_deadlock"
 
 CONSTRAINT_PREDICTOR_INSTRUCTION = """
 You are the Constraint Conflict Predictor Agent for the Polaris Neuro Guard simulation.
