@@ -112,3 +112,71 @@ constraint_predictor = LlmAgent(
     output_schema=ConstraintConflictAssessment,
     after_agent_callback=after_predictor_callback
 )
+
+class GoalAnalysisResult(BaseModel):
+    is_consistent: bool = Field(description="True if the user request is strategically consistent with the anchor goal and risk tolerance, False otherwise")
+    evidence: str = Field(description="Detailed reason or evidence for why the request is consistent or inconsistent")
+    confidence: float = Field(description="Confidence score between 0.0 and 1.0")
+
+async def after_analyzer_callback(callback_context: CallbackContext) -> None:
+    # 1. Retrieve the last model response from this agent
+    model_text = None
+    for event in reversed(callback_context.session.events):
+        if event.author == "GoalAnalyzer" and event.content:
+            parts = event.content.parts
+            if parts:
+                model_text = "".join(p.text for p in parts if p.text and not p.thought)
+                break
+                
+    if not model_text:
+        callback_context.route = "inconsistent"
+        callback_context._event_actions.route = "inconsistent"
+        return
+        
+    try:
+        cleaned_text = model_text.strip()
+        if cleaned_text.startswith("```json"):
+            cleaned_text = cleaned_text[7:]
+        if cleaned_text.endswith("```"):
+            cleaned_text = cleaned_text[:-3]
+        cleaned_text = cleaned_text.strip()
+        
+        result = GoalAnalysisResult.model_validate_json(cleaned_text)
+    except Exception:
+        callback_context.route = "inconsistent"
+        callback_context._event_actions.route = "inconsistent"
+        return
+
+    if result.is_consistent:
+        callback_context.route = "consistent"
+        callback_context._event_actions.route = "consistent"
+    else:
+        callback_context.route = "inconsistent"
+        callback_context._event_actions.route = "inconsistent"
+
+    # Trigger a dummy state delta to ensure the callback event (and route) is not discarded by the framework
+    callback_context.state["risk_tolerance"] = callback_context.state.get("risk_tolerance", "Balanced")
+
+GOAL_ANALYZER_INSTRUCTION = """
+You are the Goal Analyzer agent for the Polaris Neuro Guard simulation.
+Your responsibility is to analyze the user's current request (including steering intent and declared constraints) against their strategic `anchor_goal` (timeline, budget, reliability SLA) and `risk_tolerance` level.
+
+Guidelines:
+1. Compare the requested intent vector and constraints to the anchor goal's parameters:
+   - Check if the budget or timeline targets are likely to be violated by the current request or declared constraints.
+   - For example, if a user requests high-burn steering or constraints that directly increase costs, evaluate if this is consistent with the remaining budget.
+2. Assess the risk level of the request in the context of the user's `risk_tolerance` (Conservative, Balanced, Aggressive).
+   - Conservative: High speed or risky constraint combinations under severe weather/storms are inconsistent.
+   - Balanced: Moderate risks are acceptable.
+   - Aggressive: High risk maneuvers are consistent.
+3. Return `is_consistent` = True if the request is strategically consistent with the anchor goal and risk tolerance. Otherwise, set `is_consistent` = False.
+4. Provide a detailed `evidence` string explaining your analysis, and a `confidence` score (0.0 to 1.0) indicating how certain you are of the assessment.
+"""
+
+goal_analyzer = LlmAgent(
+    name="GoalAnalyzer",
+    model=GEMINI_MODEL,
+    instruction=GOAL_ANALYZER_INSTRUCTION,
+    output_schema=GoalAnalysisResult,
+    after_agent_callback=after_analyzer_callback
+)
