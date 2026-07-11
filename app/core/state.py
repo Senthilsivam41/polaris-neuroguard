@@ -22,6 +22,18 @@ class NodeMetadataModel(BaseModel):
     execution_timestamp: float = Field(default=0.0, ge=0.0, description="Timestamp of execution")
     attempts: int = Field(default=1, ge=0, description="Number of execution attempts")
 
+class StormModel(BaseModel):
+    storm_type: str = Field(description="Type of storm")
+    name: str = Field(description="Name of storm")
+    force_vector: Vector2D = Field(description="Force vector of the storm")
+    cost_friction_multiplier: float = Field(default=1.0, description="Cost multiplier")
+
+class IcebergModel(BaseModel):
+    name: str = Field(description="The name of the iceberg constraint")
+    x: float = Field(description="X coordinate of the iceberg center")
+    y: float = Field(description="Y coordinate of the iceberg center")
+    radius: float = Field(default=100.0, description="The safety boundary radius around the iceberg")
+
 
 # 2. Main workflow state schema with validation checks
 
@@ -55,6 +67,19 @@ class SimulationStateSchema(BaseModel):
     
     # Active storms
     active_storms: List[str] = Field(default_factory=list, description="Active environment modifier names")
+    
+    # Custom storms injected in the session
+    custom_storms: Dict[str, StormModel] = Field(default_factory=dict, description="Custom storms details")
+    
+    # Resolved storm objects active in this turn
+    resolved_storms: List[StormModel] = Field(default_factory=list, description="Resolved active storms")
+    
+    # Custom icebergs injected in the session
+    custom_icebergs: List[IcebergModel] = Field(default_factory=list, description="Custom icebergs list")
+    
+    # Simulation vector outputs
+    resultant_vector: Vector2D = Field(default_factory=Vector2D, description="Resultant velocity vector")
+    actual_burn_rate: float = Field(default=0.0, ge=0.0, description="Burn rate for the current turn")
     
     # Position and accumulated burn (with validation bounds)
     current_position: Dict[str, float] = Field(
