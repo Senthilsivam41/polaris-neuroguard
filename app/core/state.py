@@ -33,6 +33,7 @@ class SimulationStateSchema(BaseModel):
     # Simulation ID and user ID
     simulation_id: str = Field(default="", description="Unique session ID")
     user_id: str = Field(default="", description="User identifier")
+    risk_tolerance: str = Field(default="Balanced", description="User risk tolerance setting")
     
     # Initial anchor goal
     anchor_goal: GoalModel = Field(default_factory=GoalModel, description="Initial anchor goal config")

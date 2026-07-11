@@ -1,0 +1,35 @@
+{
+  "agent_count": 2,
+  "agents": [
+    {
+      "done": 0,
+      "id": "antigravity",
+      "inflight": 0,
+      "role": "",
+      "status": "alive"
+    },
+    {
+      "done": 0,
+      "id": "claude-code",
+      "inflight": 0,
+      "role": "",
+      "status": "alive"
+    }
+  ],
+  "awaiting_you": 0,
+  "claims": {
+    "by_agent": {},
+    "total": 0
+  },
+  "cycle": "waiting",
+  "generated_at": "2026-07-11T15:58:40.631Z",
+  "lanes": {
+    "awaiting_review": 0,
+    "claimable": 0,
+    "in_flight": 0,
+    "stuck": 0
+  },
+  "live_count": 0,
+  "schema_version": 1,
+  "self_agent_id": "antigravity"
+}

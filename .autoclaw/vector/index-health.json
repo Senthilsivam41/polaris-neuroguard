@@ -1,0 +1,21 @@
+{
+  "/Users/sendils/work/repo/adk-2_0/polaris-neuroguard": {
+    "schemaVersion": 1,
+    "project": "/Users/sendils/work/repo/adk-2_0/polaris-neuroguard",
+    "provider": "ollama",
+    "model": "nomic-embed-text:latest",
+    "dimension": 768,
+    "chunkCount": 34061,
+    "staleIndex": false,
+    "embeddingDegraded": false,
+    "indexedAt": "2026-07-11T15:28:03.933Z",
+    "commit": "d1ebbdaceef88c160c24481cdde4124571213986",
+    "lastRun": {
+      "filesIndexed": 8,
+      "chunksIndexed": 88,
+      "chunksDeleted": 0,
+      "incremental": true,
+      "cancelled": false
+    }
+  }
+}

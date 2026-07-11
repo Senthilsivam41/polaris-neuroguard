@@ -1,0 +1,44 @@
+{
+  "objective": "balanced",
+  "tasks": [
+    {
+      "id": "T1",
+      "effort": 2,
+      "criticality": "high",
+      "filePaths": [
+        "src/a.ts"
+      ],
+      "requiredCapabilities": [
+        "typescript"
+      ]
+    },
+    {
+      "id": "T2",
+      "dependsOn": [
+        "T1"
+      ],
+      "effort": 1,
+      "filePaths": [
+        "src/b.ts"
+      ]
+    }
+  ],
+  "agents": [
+    {
+      "id": "claude-code",
+      "capabilities": [
+        "typescript"
+      ],
+      "reputation": 0.9,
+      "maxParallel": 2
+    },
+    {
+      "id": "kilocode",
+      "capabilities": [
+        "typescript"
+      ],
+      "reputation": 0.7,
+      "maxParallel": 1
+    }
+  ]
+}
