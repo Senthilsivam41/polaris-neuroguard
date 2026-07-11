@@ -1,5 +1,29 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Dict, List, Any, Optional
+
+# 1. Nested typed models to enforce strict contracts
+
+class Vector2D(BaseModel):
+    magnitude: float = Field(default=0.0, ge=0.0, description="Magnitude of the vector force or speed")
+    heading_degrees: float = Field(default=0.0, ge=0.0, le=360.0, description="Direction in degrees (0-360°)")
+
+class GoalModel(BaseModel):
+    title: str = Field(default="", description="Goal title")
+    target_timeline_months: int = Field(default=12, gt=0, description="Target timeline in months")
+    budget_limit_usd: float = Field(default=1000000.0, gt=0.0, description="Budget limit in USD")
+    reliability_target_sla: float = Field(default=99.9, ge=0.0, le=100.0, description="Reliability target SLA percentage")
+
+class UserRequestModel(BaseModel):
+    intent_vector: Optional[Vector2D] = None
+    declared_constraints: Optional[List[str]] = None
+
+class NodeMetadataModel(BaseModel):
+    current_node: str = Field(default="", description="Current executing node name")
+    execution_timestamp: float = Field(default=0.0, ge=0.0, description="Timestamp of execution")
+    attempts: int = Field(default=1, ge=0, description="Number of execution attempts")
+
+
+# 2. Main workflow state schema with validation checks
 
 class SimulationStateSchema(BaseModel):
     """
@@ -11,17 +35,17 @@ class SimulationStateSchema(BaseModel):
     user_id: str = Field(default="", description="User identifier")
     
     # Initial anchor goal
-    anchor_goal: Dict[str, Any] = Field(default_factory=dict, description="Initial anchor goal config")
+    anchor_goal: GoalModel = Field(default_factory=GoalModel, description="Initial anchor goal config")
     
     # Current goal-contract version
     goal_contract_version: str = Field(default="1.0.0", description="Strategic contract version")
     
     # Current user request
-    current_user_request: Dict[str, Any] = Field(default_factory=dict, description="Input request payload for the current turn")
+    current_user_request: UserRequestModel = Field(default_factory=UserRequestModel, description="Input request payload for the current turn")
     
     # Intent vector
-    intent_vector: Dict[str, Any] = Field(
-        default_factory=lambda: {"magnitude": 0.0, "heading_degrees": 0.0},
+    intent_vector: Vector2D = Field(
+        default_factory=Vector2D,
         description="Strategic intent velocity and direction"
     )
     
@@ -31,15 +55,15 @@ class SimulationStateSchema(BaseModel):
     # Active storms
     active_storms: List[str] = Field(default_factory=list, description="Active environment modifier names")
     
-    # Position and accumulated burn
+    # Position and accumulated burn (with validation bounds)
     current_position: Dict[str, float] = Field(
         default_factory=lambda: {"x": 0.0, "y": 0.0},
         description="Ship Cartesian position coordinate"
     )
-    accumulated_burn: float = Field(default=0.0, description="Total financial resource consumption")
+    accumulated_burn: float = Field(default=0.0, ge=0.0, description="Total financial resource consumption")
     
-    # Drift assessment
-    angular_drift_delta: float = Field(default=0.0, description="Difference between actual and intent heading")
+    # Drift assessment (with validation bounds)
+    angular_drift_delta: float = Field(default=0.0, ge=0.0, description="Difference between actual and intent heading")
     drift_warning: bool = Field(default=False, description="True if drift > 15 degrees")
     
     # Deadlocks and collision threats
@@ -52,7 +76,31 @@ class SimulationStateSchema(BaseModel):
     hitl_telemetry_snapshot: Optional[Dict[str, Any]] = Field(default=None, description="Diagnostic snapshot of state at interruption")
     
     # Workflow node and execution metadata
-    node_metadata: Dict[str, Any] = Field(
-        default_factory=dict,
+    node_metadata: NodeMetadataModel = Field(
+        default_factory=NodeMetadataModel,
         description="ADK node execution statistics and timestamps"
     )
+
+    @model_validator(mode="after")
+    def validate_hitl_state(self) -> 'SimulationStateSchema':
+        """Ensure consistency of HITL interruption state variables."""
+        if self.hitl_interrupted:
+            if not self.hitl_reason:
+                raise ValueError("hitl_reason cannot be empty when hitl_interrupted is True")
+            if self.hitl_telemetry_snapshot is None:
+                raise ValueError("hitl_telemetry_snapshot cannot be None when hitl_interrupted is True")
+        else:
+            if self.hitl_reason:
+                raise ValueError("hitl_reason must be empty when hitl_interrupted is False")
+        return self
+
+
+# 3. Transition validation check
+
+def validate_state_transition(old_state: SimulationStateSchema, new_state: SimulationStateSchema) -> None:
+    """Enforce that state transitions obey rules (e.g. burn rate cannot decrease)."""
+    if new_state.accumulated_burn < old_state.accumulated_burn:
+        raise ValueError("accumulated_burn cannot decrease.")
+    if old_state.hitl_interrupted and not new_state.hitl_interrupted:
+        if new_state.hitl_reason:
+            raise ValueError("hitl_reason must be cleared when exiting interruption.")
