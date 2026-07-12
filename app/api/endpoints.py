@@ -1,13 +1,27 @@
 import uuid
 import threading
+import asyncio
 from enum import Enum
 from typing import Dict, Any, List, Tuple, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from app.core.simulation import execute_turn, Vector2D, EnvironmentStorm, PRESET_STORMS, Iceberg
 from app.core.config import BASE_BURN_RATE
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.adk.sessions.session import Session as AdkSession
+from google.genai import types
+from app.core.nodes import simulation_workflow
+from app.core.state import SimulationStateSchema
 
 router = APIRouter()
+
+session_service = InMemorySessionService()
+runner = Runner(
+    app_name="polaris-neuroguard",
+    node=simulation_workflow,
+    session_service=session_service
+)
 
 # 1. Enums and Pydantic Schemas for Registration
 class RiskTolerance(str, Enum):
@@ -100,6 +114,10 @@ class EvaluateDecisionRequest(BaseModel):
     )
     custom_icebergs: Optional[List[IcebergModel]] = Field(None, description="Optional custom icebergs to inject")
     custom_opposing_pairs: Optional[List[Tuple[str, str]]] = Field(None, description="Optional custom opposing constraint pairs to evaluate")
+
+class ResumeSimulationRequest(BaseModel):
+    intent_vector: Vector2DModel = Field(..., description="The new intent vector to override the paused state")
+    declared_constraints: List[str] = Field(default_factory=list, description="New list of declared constraints")
 
 class TelemetryModel(BaseModel):
     current_position: Dict[str, float] = Field(..., description="New position coordinates (x, y)")
@@ -214,7 +232,7 @@ def register_simulation(profile: UserProfile):
     response_model=EvaluateDecisionResponse,
     summary="Evaluate decision step telemetry, deadlocks, and path collisions"
 )
-def evaluate_decision(payload: EvaluateDecisionRequest):
+async def evaluate_decision(payload: EvaluateDecisionRequest):
     """Executes a single simulation step based on the user's steering intent, active constraints, and storms.
     
     Runs real-time logical deadlock checking and capsule path collision projection. Returns full telemetry
@@ -227,116 +245,140 @@ def evaluate_decision(payload: EvaluateDecisionRequest):
             raise HTTPException(status_code=404, detail="Simulation session not found.")
         session = sessions[sim_id]
         
-    # Retrieve current state from session
-    curr_pos = session.get("current_position", {"x": 0.0, "y": 0.0})
-    current_x = curr_pos.get("x", 0.0)
-    current_y = curr_pos.get("y", 0.0)
+    profile = session["profile"]
+    budget_limit = profile.get("anchor_goal", {}).get("budget_limit_usd", float("inf"))
     
-    # Map active storm names, resolving custom storms from session memory or presets
-    storms_list = []
-    for storm_name in payload.active_storms:
-        if storm_name in session.get("active_storms", {}):
-            s_data = session["active_storms"][storm_name]
-            storms_list.append(EnvironmentStorm(
-                storm_type=s_data["storm_type"],
-                name=s_data["name"],
-                force_vector=Vector2D(
-                    magnitude=s_data["magnitude"],
-                    heading_degrees=s_data["heading_degrees"]
-                ),
-                cost_friction_multiplier=1.0
-            ))
-        elif storm_name in PRESET_STORMS:
-            storms_list.append(PRESET_STORMS[storm_name])
-            
-    # Convert payload structures to core simulation formats
-    core_intent = Vector2D(
-        magnitude=payload.intent_vector.magnitude,
-        heading_degrees=payload.intent_vector.heading_degrees
-    )
-    
-    core_custom_icebergs = []
-    if payload.custom_icebergs:
-        for ib in payload.custom_icebergs:
-            core_custom_icebergs.append(Iceberg(name=ib.name, x=ib.x, y=ib.y, radius=ib.radius))
-            
-    # Execute step simulation via modular function
-    result = execute_turn(
-        current_x=current_x,
-        current_y=current_y,
-        intent_v=core_intent,
-        active_storms=storms_list,
-        base_burn_rate=BASE_BURN_RATE,
-        declared_constraints=payload.declared_constraints,
-        custom_icebergs=core_custom_icebergs,
-        custom_opposing_pairs=payload.custom_opposing_pairs
-    )
-    
-    threat_names = [ib.name for ib in result["collision_threats"]]
-    deadlocks = result["deadlocks"]
-    
-    # ponytail: simplified HITL check and reasoning construction
-    hitl_data = None
-    if deadlocks or threat_names:
-        reasons = []
-        if deadlocks:
-            reasons.append(f"Active logical deadlocks: {', '.join(f'{p[0]} & {p[1]}' for p in deadlocks)}.")
-        if threat_names:
-            reasons.append(f"Imminent collision threat with: {', '.join(threat_names)}.")
+    # Block and return paused state if currently interrupted
+    if session.get("hitl_interrupted"):
+        history = session.get("history", [])
+        last_snap = history[-1]["telemetry_snapshot"] if history else {
+            "current_position": session.get("current_position", {"x": 0.0, "y": 0.0}),
+            "intent_vector": payload.intent_vector.model_dump(),
+            "resultant_vector": {"magnitude": 0.0, "heading_degrees": 0.0},
+            "actual_burn_rate": 0.0,
+            "angular_drift_delta": 0.0
+        }
         
         hitl_data = HITLInterceptionData(
             requires_intervention=True,
-            reason=" ".join(reasons),
-            telemetry_snapshot={
-                "current_position": {"x": current_x, "y": current_y},
-                "resultant_vector": {
-                    "magnitude": result["resultant_vector"].magnitude,
-                    "heading_degrees": result["resultant_vector"].heading_degrees
-                },
-                "angular_drift_delta": result["angular_drift_delta"],
-                "deadlocks": deadlocks,
-                "threats": threat_names
-            }
+            reason=session.get("hitl_reason", ""),
+            telemetry_snapshot=session.get("hitl_telemetry_snapshot")
         )
         
-    drift_warning = result["angular_drift_delta"] > 15.0
+        active_constraints = []
+        deadlocks = history[-1]["fracture_events"]["deadlocks"] if history else []
+        threats = history[-1]["fracture_events"]["collision_threats"] if history else []
+        if deadlocks:
+            active_constraints.append("ENGINE_STALL")
+        if session.get("accumulated_burn", 0.0) > budget_limit:
+            active_constraints.append("BUDGET_OVERRUN")
+            
+        return EvaluateDecisionResponse(
+            simulation_id=sim_id,
+            telemetry=TelemetryModel(
+                current_position=session.get("current_position", {"x": 0.0, "y": 0.0}),
+                intent_vector=payload.intent_vector,
+                resultant_vector=Vector2DModel(
+                    magnitude=last_snap["resultant_vector"]["magnitude"],
+                    heading_degrees=last_snap["resultant_vector"]["heading_degrees"]
+                ),
+                actual_burn_rate=last_snap["actual_burn_rate"],
+                angular_drift_delta=last_snap["angular_drift_delta"]
+            ),
+            drift_warning=last_snap["angular_drift_delta"] > 15.0,
+            deadlocks=deadlocks,
+            collision_threats=threats,
+            hitl_interception_data=hitl_data,
+            status="PAUSED_BY_GUARDRAIL",
+            active_constraints=active_constraints
+        )
+
+    # 1. Retrieve or create the ADK Session
+    try:
+        adk_session = runner.session_service.get_session(session_id=sim_id)
+    except Exception:
+        adk_session = runner.session_service.create_session(
+            id=sim_id,
+            app_name="polaris-neuroguard",
+            user_id=profile["user_id"]
+        )
+        
+    # 2. Populate/initialize state variables
+    adk_session.state = {
+        "simulation_id": sim_id,
+        "user_id": profile["user_id"],
+        "risk_tolerance": profile["risk_tolerance"],
+        "anchor_goal": profile["anchor_goal"],
+        "intent_vector": payload.intent_vector.model_dump(),
+        "declared_constraints": payload.declared_constraints,
+        "active_storms": payload.active_storms,
+        "custom_storms": session.get("active_storms", {}),
+        "custom_icebergs": [ib.model_dump() for ib in payload.custom_icebergs] if payload.custom_icebergs else [],
+        "current_position": session.get("current_position", {"x": 0.0, "y": 0.0}),
+        "accumulated_burn": session.get("accumulated_burn", 0.0),
+        "active_deadlocks": [],
+        "collision_threats": [],
+        "hitl_interrupted": False,
+        "hitl_reason": "",
+        "hitl_telemetry_snapshot": None
+    }
+    runner.session_service.update_session(adk_session)
     
-    # Compute status and active constraints
-    status = "RUNNING"
-    if hitl_data is not None:
-        status = "PAUSED_BY_GUARDRAIL"
+    # 3. Execute ADK workflow graph via the runner
+    invocation_id = str(uuid.uuid4())
+    events = []
+    async for event in runner.run_async(
+        user_id=profile["user_id"],
+        session_id=sim_id,
+        invocation_id=invocation_id,
+        new_message=types.Content(role="user", parts=[types.Part(text="{}")])
+    ):
+        events.append(event)
         
+    # 4. Fetch the final updated state from the ADK Session
+    adk_session = runner.session_service.get_session(session_id=sim_id)
+    state = SimulationStateSchema.model_validate(adk_session.state)
+    
+    # 5. Determine active constraints and status
     active_constraints = []
-    if deadlocks:
+    if state.active_deadlocks:
         active_constraints.append("ENGINE_STALL")
-        
-    with sessions_lock:
-        current_accumulated = sessions[sim_id].get("accumulated_burn", 0.0)
-        profile = sessions[sim_id]["profile"]
-        
-    projected_burn = current_accumulated + result["actual_burn_rate"]
-    budget_limit = profile.get("anchor_goal", {}).get("budget_limit_usd", float("inf"))
-    if projected_burn > budget_limit:
+    if state.accumulated_burn > budget_limit:
         active_constraints.append("BUDGET_OVERRUN")
         
-    # Save the updated step results and detailed telemetry logs to history
-    new_pos = result["new_position"]
+    status = "PAUSED_BY_GUARDRAIL" if state.hitl_interrupted else "RUNNING"
+    
+    hitl_data = None
+    if state.hitl_interrupted:
+        hitl_data = HITLInterceptionData(
+            requires_intervention=True,
+            reason=state.hitl_reason,
+            telemetry_snapshot=state.hitl_telemetry_snapshot
+        )
+        
+    # 6. Update local session store and history
     with sessions_lock:
-        sessions[sim_id]["current_position"] = new_pos
-        sessions[sim_id]["accumulated_burn"] = projected_burn
-        history_list = sessions[sim_id].setdefault("history", [])
+        session["current_position"] = state.current_position
+        session["accumulated_burn"] = state.accumulated_burn
+        session["hitl_interrupted"] = state.hitl_interrupted
+        session["hitl_reason"] = state.hitl_reason
+        session["hitl_telemetry_snapshot"] = state.hitl_telemetry_snapshot
+        if state.hitl_interrupted:
+            session["paused_invocation_id"] = invocation_id
+            
+        history_list = session.setdefault("history", [])
         turn_number = len(history_list) + 1
         history_list.append({
             "turn_number": turn_number,
             "telemetry_snapshot": {
-                "current_position": new_pos,
+                "current_position": state.current_position,
                 "intent_vector": payload.intent_vector.model_dump(),
                 "resultant_vector": {
-                    "magnitude": result["resultant_vector"].magnitude,
-                    "heading_degrees": result["resultant_vector"].heading_degrees
+                    "magnitude": state.resultant_vector.magnitude,
+                    "heading_degrees": state.resultant_vector.heading_degrees
                 },
-                "actual_burn_rate": result["actual_burn_rate"],
-                "angular_drift_delta": result["angular_drift_delta"]
+                "actual_burn_rate": state.actual_burn_rate,
+                "angular_drift_delta": state.angular_drift_delta
             },
             "active_storms": payload.active_storms,
             "applied_decision": {
@@ -344,8 +386,8 @@ def evaluate_decision(payload: EvaluateDecisionRequest):
                 "declared_constraints": payload.declared_constraints
             },
             "fracture_events": {
-                "deadlocks": deadlocks,
-                "collision_threats": threat_names,
+                "deadlocks": state.active_deadlocks,
+                "collision_threats": state.collision_threats,
                 "active_constraints": active_constraints
             }
         })
@@ -353,18 +395,137 @@ def evaluate_decision(payload: EvaluateDecisionRequest):
     return EvaluateDecisionResponse(
         simulation_id=sim_id,
         telemetry=TelemetryModel(
-            current_position=new_pos,
+            current_position=state.current_position,
             intent_vector=payload.intent_vector,
             resultant_vector=Vector2DModel(
-                magnitude=result["resultant_vector"].magnitude,
-                heading_degrees=result["resultant_vector"].heading_degrees
+                magnitude=state.resultant_vector.magnitude,
+                heading_degrees=state.resultant_vector.heading_degrees
             ),
-            actual_burn_rate=result["actual_burn_rate"],
-            angular_drift_delta=result["angular_drift_delta"]
+            actual_burn_rate=state.actual_burn_rate,
+            angular_drift_delta=state.angular_drift_delta
         ),
-        drift_warning=drift_warning,
-        deadlocks=deadlocks,
-        collision_threats=threat_names,
+        drift_warning=state.drift_warning,
+        deadlocks=state.active_deadlocks,
+        collision_threats=state.collision_threats,
+        hitl_interception_data=hitl_data,
+        status=status,
+        active_constraints=active_constraints
+    )
+
+@router.post(
+    "/simulation/{simulation_id}/resume",
+    response_model=EvaluateDecisionResponse,
+    summary="Resume simulation from a paused state"
+)
+async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest):
+    with sessions_lock:
+        if simulation_id not in sessions:
+            raise HTTPException(status_code=404, detail="Simulation session not found.")
+        session = sessions[simulation_id]
+        
+    if not session.get("hitl_interrupted"):
+        raise HTTPException(status_code=400, detail="Simulation is not currently paused.")
+        
+    invocation_id = session.get("paused_invocation_id")
+    if not invocation_id:
+        raise HTTPException(status_code=500, detail="No active invocation ID found for resume.")
+        
+    # Build state delta to clear HITL flag and update decision
+    state_delta = {
+        "intent_vector": payload.intent_vector.model_dump(),
+        "declared_constraints": payload.declared_constraints,
+        "hitl_interrupted": False,
+        "hitl_reason": "",
+        "hitl_telemetry_snapshot": None
+    }
+    
+    # Run the workflow resuming from the invocation_id
+    events = []
+    async for event in runner.run_async(
+        user_id=session["profile"]["user_id"],
+        session_id=simulation_id,
+        invocation_id=invocation_id,
+        state_delta=state_delta
+    ):
+        events.append(event)
+        
+    # Fetch updated state
+    adk_session = runner.session_service.get_session(session_id=simulation_id)
+    state = SimulationStateSchema.model_validate(adk_session.state)
+    
+    # Update local session
+    profile = session["profile"]
+    budget_limit = profile.get("anchor_goal", {}).get("budget_limit_usd", float("inf"))
+    projected_burn = state.accumulated_burn
+    
+    active_constraints = []
+    if state.active_deadlocks:
+        active_constraints.append("ENGINE_STALL")
+    if projected_burn > budget_limit:
+        active_constraints.append("BUDGET_OVERRUN")
+        
+    status = "PAUSED_BY_GUARDRAIL" if state.hitl_interrupted else "RUNNING"
+    
+    hitl_data = None
+    if state.hitl_interrupted:
+        hitl_data = HITLInterceptionData(
+            requires_intervention=True,
+            reason=state.hitl_reason,
+            telemetry_snapshot=state.hitl_telemetry_snapshot
+        )
+        
+    with sessions_lock:
+        session["current_position"] = state.current_position
+        session["accumulated_burn"] = projected_burn
+        session["hitl_interrupted"] = state.hitl_interrupted
+        session["hitl_reason"] = state.hitl_reason
+        session["hitl_telemetry_snapshot"] = state.hitl_telemetry_snapshot
+        if state.hitl_interrupted:
+            session["paused_invocation_id"] = invocation_id
+        else:
+            session.pop("paused_invocation_id", None)
+            
+        history_list = session.setdefault("history", [])
+        turn_number = len(history_list) + 1
+        history_list.append({
+            "turn_number": turn_number,
+            "telemetry_snapshot": {
+                "current_position": state.current_position,
+                "intent_vector": payload.intent_vector.model_dump(),
+                "resultant_vector": {
+                    "magnitude": state.resultant_vector.magnitude,
+                    "heading_degrees": state.resultant_vector.heading_degrees
+                },
+                "actual_burn_rate": state.actual_burn_rate,
+                "angular_drift_delta": state.angular_drift_delta
+            },
+            "active_storms": state.active_storms,
+            "applied_decision": {
+                "intent_vector": payload.intent_vector.model_dump(),
+                "declared_constraints": payload.declared_constraints
+            },
+            "fracture_events": {
+                "deadlocks": state.active_deadlocks,
+                "collision_threats": state.collision_threats,
+                "active_constraints": active_constraints
+            }
+        })
+        
+    return EvaluateDecisionResponse(
+        simulation_id=simulation_id,
+        telemetry=TelemetryModel(
+            current_position=state.current_position,
+            intent_vector=payload.intent_vector,
+            resultant_vector=Vector2DModel(
+                magnitude=state.resultant_vector.magnitude,
+                heading_degrees=state.resultant_vector.heading_degrees
+            ),
+            actual_burn_rate=state.actual_burn_rate,
+            angular_drift_delta=state.angular_drift_delta
+        ),
+        drift_warning=state.drift_warning,
+        deadlocks=state.active_deadlocks,
+        collision_threats=state.collision_threats,
         hitl_interception_data=hitl_data,
         status=status,
         active_constraints=active_constraints
