@@ -6,8 +6,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.genai.types import Content, Part
 from app.core.config import GEMINI_MODEL
 from app.core.tools import logical_deadlocks_tool
-from app.core.simulation import check_logical_deadlocks
-from app.core.state import Vector2D as StateVector2D
+from app.core.state import Vector2D as StateVector2D, get_typed_state, update_typed_state
 
 class ConflictDetail(BaseModel):
     constraint_a: str = Field(description="First constraint in conflict")
@@ -114,22 +113,23 @@ async def after_predictor_callback(callback_context: CallbackContext) -> None:
         if c.conflict_type == "static" or c.confidence >= 0.7:
             deadlocks_list.append([c.constraint_a, c.constraint_b])
             
-    # Persist detected deadlocks to session state
-    callback_context.state["active_deadlocks"] = deadlocks_list
+    # Persist detected deadlocks to session state via typed update
+    delta: dict = {"active_deadlocks": deadlocks_list}
     
     if assessment.has_deadlock or deadlocks_list:
         callback_context.route = "deadlock"
         callback_context._event_actions.route = "deadlock"
-        intent = callback_context.state.get("intent_vector")
-        if intent:
-            heading = intent.heading_degrees if hasattr(intent, "heading_degrees") else intent.get("heading_degrees", 0.0)
-            callback_context.state["intent_vector"] = StateVector2D(
-                magnitude=0.0,
-                heading_degrees=heading
-            )
+        current_state = get_typed_state(callback_context.state)
+        intent = current_state.intent_vector
+        delta["intent_vector"] = StateVector2D(
+            magnitude=0.0,
+            heading_degrees=intent.heading_degrees
+        ).model_dump()
     else:
         callback_context.route = "no_deadlock"
         callback_context._event_actions.route = "no_deadlock"
+
+    update_typed_state(callback_context.state, delta, validate_transition=False)
 
 async def _fallback_static_check(callback_context: CallbackContext) -> None:
     """Fallback SMT check that scans tool responses in session events for static deadlocks."""
@@ -139,20 +139,24 @@ async def _fallback_static_check(callback_context: CallbackContext) -> None:
             if fr.name == "check_logical_deadlocks_tool" and fr.response:
                 for p1, p2 in fr.response:
                     deadlocks_list.append([p1, p2])
+                    
+    delta: dict = {}
     if deadlocks_list:
-        callback_context.state["active_deadlocks"] = deadlocks_list
+        delta["active_deadlocks"] = deadlocks_list
         callback_context.route = "deadlock"
         callback_context._event_actions.route = "deadlock"
-        intent = callback_context.state.get("intent_vector")
-        if intent:
-            heading = intent.heading_degrees if hasattr(intent, "heading_degrees") else intent.get("heading_degrees", 0.0)
-            callback_context.state["intent_vector"] = StateVector2D(
-                magnitude=0.0,
-                heading_degrees=heading
-            )
+        current_state = get_typed_state(callback_context.state)
+        intent = current_state.intent_vector
+        delta["intent_vector"] = StateVector2D(
+            magnitude=0.0,
+            heading_degrees=intent.heading_degrees
+        ).model_dump()
     else:
         callback_context.route = "no_deadlock"
         callback_context._event_actions.route = "no_deadlock"
+
+    if delta:
+        update_typed_state(callback_context.state, delta, validate_transition=False)
 
 CONSTRAINT_PREDICTOR_INSTRUCTION = """
 You are the Constraint Conflict Predictor Agent for the Polaris Neuro Guard simulation.
@@ -218,8 +222,13 @@ async def after_analyzer_callback(callback_context: CallbackContext) -> None:
         callback_context.route = "inconsistent"
         callback_context._event_actions.route = "inconsistent"
 
-    # Trigger a dummy state delta to ensure the callback event (and route) is not discarded by the framework
-    callback_context.state["risk_tolerance"] = callback_context.state.get("risk_tolerance", "Balanced")
+    # Trigger a dummy state delta via typed helper so route event is preserved
+    current_state = get_typed_state(callback_context.state)
+    update_typed_state(
+        callback_context.state,
+        {"risk_tolerance": current_state.risk_tolerance},
+        validate_transition=False
+    )
 
 GOAL_ANALYZER_INSTRUCTION = """
 You are the Goal Analyzer agent for the Polaris Neuro Guard simulation.

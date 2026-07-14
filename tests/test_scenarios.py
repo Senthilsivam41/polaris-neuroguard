@@ -252,3 +252,140 @@ class TestSimulationScenarios(unittest.TestCase):
         self.assertIsNotNone(data["hitl_interception_data"])
         self.assertTrue(data["hitl_interception_data"]["requires_intervention"])
         print("[+] Self-blocking iceberg deadlock, engine stall, and capsule collision verified!")
+
+    def test_a2a_nodes_exposable(self):
+        """FR-3.5 / NFR-1.2: all four nodes must be to_a2a-exposable.
+
+        Verifies the get_a2a_nodes() factory is importable and that all four
+        nodes satisfy the to_a2a() type contract (BaseAgent | Workflow). The
+        actual to_a2a() call requires the google-adk[a2a] extra (the 'a2a'
+        SDK package). This test verifies structural eligibility and that the
+        ADK a2a utility module exists; it skips the live to_a2a() call if
+        the optional 'a2a' package is absent from the test environment.
+        """
+        import importlib
+        from app.core.nodes import (
+            get_a2a_nodes,
+            goal_analyzer, constraint_predictor,
+            simulation_workflow,
+        )
+        from google.adk.agents.base_agent import BaseAgent
+        from google.adk.workflow import Workflow
+
+        # get_a2a_nodes must be callable (lazy factory — not eager)
+        self.assertTrue(callable(get_a2a_nodes))
+
+        # LlmAgents are BaseAgent subclasses — valid to_a2a inputs
+        self.assertIsInstance(goal_analyzer, BaseAgent)
+        self.assertIsInstance(constraint_predictor, BaseAgent)
+
+        # The overall graph is a Workflow — also valid to_a2a input
+        self.assertIsInstance(simulation_workflow, Workflow)
+
+        # The ADK a2a utility module must exist (even without the a2a SDK)
+        spec = importlib.util.find_spec("google.adk.a2a.utils.agent_to_a2a")
+        self.assertIsNotNone(
+            spec,
+            "google.adk.a2a.utils.agent_to_a2a not found — google-adk[a2a] not installed"
+        )
+
+        # If the optional a2a SDK is present, actually call get_a2a_nodes()
+        a2a_sdk = importlib.util.find_spec("a2a")
+        if a2a_sdk is not None:
+            nodes = get_a2a_nodes()
+            for name in ("goal_analyzer", "constraint_predictor", "weather_station", "path_simulator"):
+                self.assertIn(name, nodes)
+                self.assertIsNotNone(nodes[name], f"to_a2a({name}) returned None")
+            print("[+] All four nodes A2A-exposable (a2a SDK present, get_a2a_nodes() verified)")
+        else:
+            print("[+] FR-3.5 structural check passed — a2a SDK absent, get_a2a_nodes() import verified")
+
+    def test_evaluate_decision_idempotency(self):
+        """Acceptance: two consecutive evaluate-decision calls with identical payloads
+        must accumulate position (session continuity) and not reset state.
+
+        Proves that the ADK session survives across API calls and that the
+        in-memory session store correctly threads position forward.
+
+        LLM calls are mocked at the GoogleLLM layer so the test is hermetic
+        and does not require Gemini quota.
+        """
+        import json
+        from unittest.mock import patch
+        from google.adk.models.llm_response import LlmResponse
+        from google.genai import types as genai_types
+
+        goal_result_json = json.dumps({
+            "is_consistent": True,
+            "evidence": "Test short-circuit.",
+            "confidence": 1.0,
+        })
+        predictor_result_json = json.dumps({
+            "has_deadlock": False,
+            "conflicts": [],
+        })
+
+        call_count = {"n": 0}
+
+        async def mock_generate(self_inner, llm_request, stream=False):
+            """Yield one LlmResponse per LLM call, alternating goal/predictor."""
+            call_count["n"] += 1
+            # Odd calls → goal analyzer, even calls → constraint predictor
+            text = goal_result_json if call_count["n"] % 2 == 1 else predictor_result_json
+            yield LlmResponse(
+                content=genai_types.Content(
+                    role="model",
+                    parts=[genai_types.Part(text=text)]
+                )
+            )
+
+        with patch(
+            "google.adk.models.google_llm.Gemini.generate_content_async",
+            new=mock_generate,
+        ):
+            reg_payload = {
+                "user_id": "idempotency_user",
+                "role": "CTO",
+                "company_scale": "Scaleup",
+                "industry": "Logistics",
+                "anchor_goal": {
+                    "title": "Idempotency Check",
+                    "target_timeline_months": 12,
+                    "budget_limit_usd": 500000.0,
+                    "reliability_target_sla": 99.0,
+                },
+                "risk_tolerance": "Balanced",
+            }
+            reg_resp = self.client.post("/api/v1/simulation/register", json=reg_payload)
+            self.assertEqual(reg_resp.status_code, 200)
+            sim_id = reg_resp.json()["simulation_id"]
+
+            eval_payload = {
+                "simulation_id": sim_id,
+                "intent_vector": {"magnitude": 10.0, "heading_degrees": 0.0},
+                "declared_constraints": [],
+                "active_storms": [],
+            }
+
+            # Turn 1 — position advances from (0,0) by (0, +10) → (0, 10)
+            resp1 = self.client.post("/api/v1/simulation/evaluate-decision", json=eval_payload)
+            self.assertEqual(resp1.status_code, 200)
+            pos1 = resp1.json()["telemetry"]["current_position"]
+            self.assertAlmostEqual(pos1["x"], 0.0)
+            self.assertAlmostEqual(pos1["y"], 10.0)
+
+            # Turn 2 — same payload, position continues from (0,10) → (0, 20)
+            resp2 = self.client.post("/api/v1/simulation/evaluate-decision", json=eval_payload)
+            self.assertEqual(resp2.status_code, 200)
+            pos2 = resp2.json()["telemetry"]["current_position"]
+            self.assertAlmostEqual(pos2["x"], 0.0)
+            self.assertAlmostEqual(pos2["y"], 20.0)
+
+            # History must record both turns in order
+            hist_resp = self.client.get(f"/api/v1/simulation/{sim_id}/history")
+            self.assertEqual(hist_resp.status_code, 200)
+            hist = hist_resp.json()
+            self.assertEqual(hist["total_turns_executed"], 2)
+            self.assertEqual(hist["history"][0]["turn_number"], 1)
+            self.assertEqual(hist["history"][1]["turn_number"], 2)
+            print("[+] Session idempotency and position accumulation verified across 2 turns")
