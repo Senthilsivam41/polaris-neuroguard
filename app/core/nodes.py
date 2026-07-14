@@ -1,5 +1,5 @@
 from typing import List, Dict, Any
-from google.adk.workflow import node
+from google.adk.workflow import node, Workflow, Edge, START, RetryConfig
 from google.adk.agents.context import Context
 from google.adk.workflow._errors import NodeInterruptedError
 from app.core.state import StormModel, Vector2D, IcebergModel
@@ -17,12 +17,15 @@ from app.core.simulation import (
 
 BASE_BURN_RATE = 100.0
 
-@node
+@node(retry_config=RetryConfig(max_attempts=3))
 def weather_station(ctx: Context, active_storms: list[str], custom_storms: dict[str, StormModel]) -> list[StormModel]:
     resolved = []
     for storm_name in active_storms:
         if storm_name in custom_storms:
-            resolved.append(custom_storms[storm_name])
+            storm = custom_storms[storm_name]
+            if isinstance(storm, dict):
+                storm = StormModel(**storm)
+            resolved.append(storm)
         elif storm_name in PRESET_STORMS:
             preset = PRESET_STORMS[storm_name]
             resolved.append(StormModel(
@@ -40,12 +43,14 @@ def weather_station(ctx: Context, active_storms: list[str], custom_storms: dict[
     ctx.state["resolved_storms"] = resolved
     return resolved
 
-@node
+@node(retry_config=RetryConfig(max_attempts=3))
 def path_simulator(ctx: Context) -> dict:
     state = ctx.state
     
     # 1. Resolve intent velocity
     intent_v = state["intent_vector"]
+    if isinstance(intent_v, dict):
+        intent_v = Vector2D(**intent_v)
     # If active deadlocks are present, intent magnitude drops to 0.0 (stall)
     if state["active_deadlocks"]:
         intent_v = Vector2D(magnitude=0.0, heading_degrees=intent_v.heading_degrees)
@@ -53,8 +58,11 @@ def path_simulator(ctx: Context) -> dict:
     sim_intent = SimVector2D(magnitude=intent_v.magnitude, heading_degrees=intent_v.heading_degrees)
     
     # 2. Resolve active storms to EnvironmentStorm objects
+    resolved_storms = state["resolved_storms"]
     storms_list = []
-    for storm in state["resolved_storms"]:
+    for storm in resolved_storms:
+        if isinstance(storm, dict):
+            storm = StormModel(**storm)
         storms_list.append(EnvironmentStorm(
             storm_type=storm.storm_type,
             name=storm.name,
@@ -75,10 +83,13 @@ def path_simulator(ctx: Context) -> dict:
     new_pos = {"x": new_x, "y": new_y}
     
     # 5. Check for trajectory collision threats (3 turns look-ahead)
-    custom_ib_list = [
-        Iceberg(name=ib.name, x=ib.x, y=ib.y, radius=ib.radius)
-        for ib in state["custom_icebergs"]
-    ]
+    custom_icebergs = state["custom_icebergs"]
+    custom_ib_list = []
+    for ib in custom_icebergs:
+        if isinstance(ib, dict):
+            ib = IcebergModel(**ib)
+        custom_ib_list.append(Iceberg(name=ib.name, x=ib.x, y=ib.y, radius=ib.radius))
+        
     all_icebergs = DEFAULT_ICEBERGS + custom_ib_list
     collisions = check_trajectory_collision(
         curr_pos.get("x", 0.0), curr_pos.get("y", 0.0), sim_resultant, all_icebergs
@@ -150,3 +161,19 @@ def path_simulator(ctx: Context) -> dict:
         "collision_threats": collision_names,
         "status": "RUNNING"
     }
+
+from app.core.agents import goal_analyzer, constraint_predictor
+
+goal_analyzer.retry_config = RetryConfig(max_attempts=3)
+constraint_predictor.retry_config = RetryConfig(max_attempts=3)
+
+simulation_workflow = Workflow(
+    name="SimulationWorkflow",
+    edges=[
+        Edge(from_node=START, to_node=goal_analyzer),
+        Edge(from_node=goal_analyzer, to_node=constraint_predictor, route="consistent"),
+        Edge(from_node=constraint_predictor, to_node=weather_station, route="no_deadlock"),
+        Edge(from_node=constraint_predictor, to_node=path_simulator, route="deadlock"),
+        Edge(from_node=weather_station, to_node=path_simulator),
+    ]
+)

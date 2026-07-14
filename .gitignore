@@ -30,6 +30,9 @@ htmlcov/
 .autoclaw/orchestrator/board.md
 .autoclaw/orchestrator/reconcile-report.json
 .autoclaw/orchestrator/sprints/
-.autoclaw/autobuild/
+.autoclaw/autobuild
 .autoclaw/orchestrator/comms/cluster-map.json
 .autoclaw/orchestrator/comms/registry.json
+.autoclaw/**
+.autoclaw/.*
+.autobuild/orchestrator/**
