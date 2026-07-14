@@ -11,8 +11,17 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.sessions.session import Session as AdkSession
 from google.genai import types
+from datetime import datetime, timezone
+from pydantic import field_validator
 from app.core.nodes import simulation_workflow
 from app.core.state import SimulationStateSchema, get_typed_state, update_typed_state, validate_state_transition
+from app.core.goal_contract import GoalContract, OutcomeCategorization
+from app.core.goal_contract_service import (
+    goal_contract_repo,
+    ContractNotFoundError,
+    StaleVersionError,
+    VersionConflictError,
+)
 
 router = APIRouter()
 
@@ -177,6 +186,32 @@ class RegisterSimulationResponse(BaseModel):
     simulation_id: str = Field(..., description="The generated simulation session ID")
     quantum_mountain_coordinates: Dict[str, float] = Field(..., description="Locked-in Quantum Mountain coordinates")
     user_profile: UserProfile = Field(..., description="The registered user profile details")
+    active_contract_id: Optional[str] = Field(default=None, description="Active Goal Contract unique ID")
+    active_contract_version: Optional[int] = Field(default=None, description="Active Goal Contract version number")
+
+class ChangeRequestPayload(BaseModel):
+    simulation_id: str = Field(..., description="Target simulation session ID.")
+    request_id: str = Field(..., description="Unique request ID / idempotency key.")
+    natural_language_request: str = Field(..., description="Raw text of natural-language change request.")
+    expected_goal_contract_version: int = Field(..., ge=1, description="Expected active contract version.")
+    explicit_change_intent: Optional[str] = Field(default=None, description="Optional explicit change intent description.")
+    actor_id: Optional[str] = Field(default=None, description="Actor/User ID submitting the change request.")
+
+    @field_validator("natural_language_request")
+    @classmethod
+    def validate_request_text(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("natural_language_request must be non-empty.")
+        return v.strip()
+
+class ChangeRequestResponse(BaseModel):
+    request_id: str = Field(..., description="Request ID / idempotency key.")
+    contract_id: str = Field(..., description="Target Goal Contract ID.")
+    active_contract_version: int = Field(..., description="Active contract version number.")
+    idempotency_result: str = Field(..., description="'accepted' for initial submit, 'idempotent_replay' for duplicates.")
+    request_acceptance_status: str = Field(default="RECEIVED", description="Processing status of the change request.")
+    classification_status: str = Field(default="PENDING_DRIFT_ANALYSIS", description="Initial classification status.")
+    trace_id: str = Field(..., description="Correlation / trace ID for downstream processing.")
 
 class InjectStormResponse(BaseModel):
     status: str = Field(..., description="Status of the injection request", examples=["success"])
@@ -206,10 +241,33 @@ def get_status():
 )
 def register_simulation(profile: UserProfile):
     """Registers a user profile containing role, scale, industry, anchor goals, and risk tolerance.
-    Initializes simulation coordinates at (0,0) with destination targets set.
+    Initializes simulation coordinates at (0,0) with destination targets set and baseline GoalContract (v1).
     """
     sim_id = str(uuid.uuid4())
+    contract_id = f"contract-{sim_id}"
     
+    anchor = profile.anchor_goal
+    baseline_contract = GoalContract(
+        contract_id=contract_id,
+        contract_version=1,
+        original_request_text=f"Initial registration for anchor goal: {anchor.title}",
+        normalized_objective=anchor.title,
+        deliverables=[anchor.title],
+        in_scope_items=[anchor.title],
+        outcomes=OutcomeCategorization(
+            required_outcomes=[anchor.title],
+            optional_outcomes=[],
+            excluded_outcomes=[]
+        ),
+        budget_limit_usd=anchor.budget_limit_usd,
+        target_timeline_months=anchor.target_timeline_months,
+        reliability_target_sla=anchor.reliability_target_sla,
+        risk_tolerance=profile.risk_tolerance,
+        creator_id=profile.user_id,
+        acceptance_criteria=[f"Achieve {anchor.title} within SLA {anchor.reliability_target_sla}%"]
+    )
+    saved_contract = goal_contract_repo.create_baseline_contract(baseline_contract)
+
     with sessions_lock:
         sessions[sim_id] = {
             "profile": profile.model_dump(),
@@ -218,14 +276,106 @@ def register_simulation(profile: UserProfile):
             "accumulated_burn": 0.0,
             "active_storms": {},
             "custom_storms": {},
-            "history": []
+            "history": [],
+            "active_contract_id": saved_contract.contract_id,
+            "active_contract_version": saved_contract.contract_version,
+            "active_contract_fingerprint": saved_contract.content_fingerprint,
+            "change_requests": {}
         }
         
     return {
         "simulation_id": sim_id,
         "quantum_mountain_coordinates": {"x": 0.0, "y": 1000.0},
-        "user_profile": profile
+        "user_profile": profile,
+        "active_contract_id": saved_contract.contract_id,
+        "active_contract_version": saved_contract.contract_version
     }
+
+
+@router.post(
+    "/simulation/change-requests",
+    response_model=ChangeRequestResponse,
+    summary="Submit a natural-language change request for goal drift analysis (DRIFT-003)"
+)
+def submit_change_request(payload: ChangeRequestPayload):
+    """Submits a natural-language change request referencing the expected active goal-contract version.
+    Verifies actor ownership and contract version alignment. Stores the request without mutating the active Goal Contract.
+    """
+    sim_id = payload.simulation_id
+    
+    with sessions_lock:
+        if sim_id not in sessions:
+            raise HTTPException(status_code=404, detail="Simulation session not found.")
+        session = sessions[sim_id]
+        
+    profile = session.get("profile", {})
+    owner_id = profile.get("user_id", "")
+    
+    # Ownership authorization check
+    if payload.actor_id and owner_id and payload.actor_id != owner_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Actor ID '{payload.actor_id}' does not match simulation owner '{owner_id}'."
+        )
+
+    # Idempotency check
+    change_requests = session.setdefault("change_requests", {})
+    if payload.request_id in change_requests:
+        prior_record = change_requests[payload.request_id]
+        replay_resp = prior_record["response"].copy()
+        replay_resp["idempotency_result"] = "idempotent_replay"
+        return replay_resp
+
+    contract_id = session.get("active_contract_id", f"contract-{sim_id}")
+    
+    try:
+        active_contract = goal_contract_repo.get_latest_contract(contract_id)
+    except ContractNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Goal Contract '{contract_id}' not found for simulation '{sim_id}'."
+        )
+
+    # Version check (STALE Expected Version -> 409 Conflict)
+    if payload.expected_goal_contract_version != active_contract.contract_version:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "STALE_GOAL_CONTRACT_VERSION",
+                "message": f"Expected goal contract version {payload.expected_goal_contract_version} is stale. Current active version is {active_contract.contract_version}.",
+                "contract_id": contract_id,
+                "current_version": active_contract.contract_version,
+                "expected_version": payload.expected_goal_contract_version,
+            }
+        )
+
+    trace_id = str(uuid.uuid4())
+    received_at = datetime.now(timezone.utc).isoformat()
+
+    response_data = {
+        "request_id": payload.request_id,
+        "contract_id": contract_id,
+        "active_contract_version": active_contract.contract_version,
+        "idempotency_result": "accepted",
+        "request_acceptance_status": "RECEIVED",
+        "classification_status": "PENDING_DRIFT_ANALYSIS",
+        "trace_id": trace_id,
+    }
+
+    # Store request record without mutating the goal contract
+    with sessions_lock:
+        change_requests[payload.request_id] = {
+            "request_id": payload.request_id,
+            "raw_text": payload.natural_language_request,
+            "expected_version": payload.expected_goal_contract_version,
+            "resolved_active_version": active_contract.contract_version,
+            "explicit_change_intent": payload.explicit_change_intent,
+            "actor": payload.actor_id or owner_id,
+            "received_timestamp": received_at,
+            "response": response_data
+        }
+
+    return response_data
 
 
 @router.post(

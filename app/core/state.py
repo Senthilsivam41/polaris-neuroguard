@@ -50,8 +50,11 @@ class SimulationStateSchema(BaseModel):
     # Initial anchor goal
     anchor_goal: GoalModel = Field(default_factory=GoalModel, description="Initial anchor goal config")
     
-    # Current goal-contract version
-    goal_contract_version: str = Field(default="1.0.0", description="Strategic contract version")
+    # Current goal-contract version & references (DRIFT-001)
+    goal_contract_version: str = Field(default="1.0.0", description="Strategic contract version label")
+    active_contract_id: Optional[str] = Field(default=None, description="Active Goal Contract unique ID")
+    active_contract_version: Optional[int] = Field(default=None, description="Active Goal Contract version number")
+    active_contract_fingerprint: Optional[str] = Field(default=None, description="Active Goal Contract SHA-256 fingerprint")
     
     # Current user request
     current_user_request: UserRequestModel = Field(default_factory=UserRequestModel, description="Input request payload for the current turn")
