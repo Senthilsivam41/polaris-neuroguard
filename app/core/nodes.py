@@ -26,7 +26,7 @@ WORKFLOW_NODE_RETRY_CONFIG = RetryConfig(
     initial_delay=WORKFLOW_RETRY_CONFIG.initial_delay,
     max_delay=WORKFLOW_RETRY_CONFIG.max_delay,
     backoff_factor=WORKFLOW_RETRY_CONFIG.backoff_factor,
-    exceptions_to_skip=[UnknownStormError]
+    exceptions_to_skip=(UnknownStormError,)
 )
 
 @node(retry_config=WORKFLOW_NODE_RETRY_CONFIG)
