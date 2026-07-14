@@ -3,12 +3,30 @@ import math
 from fastapi.testclient import TestClient
 from app.main import app
 
+from unittest.mock import patch
+from google.genai.types import Content, Part
+from google.adk.models.llm_response import LlmResponse
+
 class TestSimulationScenarios(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
         # Clear in-memory session store before each test scenario
         from app.api.endpoints import sessions
         sessions.clear()
+
+        # Hermetic LLM patch for scenario tests
+        async def mock_generate(self_inner, llm_request, stream=False):
+            text = '{"is_consistent": true, "evidence": "Mock consistent", "confidence": 1.0}'
+            if "conflict" in str(llm_request).lower() or "deadlock" in str(llm_request).lower():
+                text = '{"has_deadlock": false, "conflicts": []}'
+            yield LlmResponse(content=Content(role="model", parts=[Part(text=text)]))
+
+        self.patcher = patch("google.adk.models.google_llm.Gemini.generate_content_async", new=mock_generate)
+        self.patcher.start()
+
+    def tearDown(self):
+        if hasattr(self, "patcher"):
+            self.patcher.stop()
 
     def test_scenario_a_sovereign_storm(self):
         """Scenario A: 'The Sovereign Storm'

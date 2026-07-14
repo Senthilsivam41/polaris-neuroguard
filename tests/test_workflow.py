@@ -97,7 +97,8 @@ class TestWorkflow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved[0].cost_friction_multiplier, 2.0)
 
     async def test_weather_station_unknown_storm(self):
-        """Verify weather station rejects unknown storms with ValueError."""
+        """Verify weather station rejects unknown storms with UnknownStormError."""
+        from app.core.nodes import UnknownStormError
         state = SimulationStateSchema(
             active_storms=["Unknown Mystery Storm"]
         )
@@ -105,7 +106,7 @@ class TestWorkflow(unittest.IsolatedAsyncioTestCase):
         
         runner = NodeRunner(node=weather_station, parent_ctx=self.ctx)
         child_ctx = await runner.run(node_input={})
-        self.assertIsInstance(child_ctx.error, ValueError)
+        self.assertIsInstance(child_ctx.error, UnknownStormError)
 
     async def test_path_simulator_normal_execution(self):
         """Verify path simulator processes normal step simulation accurately."""

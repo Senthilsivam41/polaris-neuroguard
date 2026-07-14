@@ -217,6 +217,7 @@ def register_simulation(profile: UserProfile):
             "current_position": {"x": 0.0, "y": 0.0},
             "accumulated_burn": 0.0,
             "active_storms": {},
+            "custom_storms": {},
             "history": []
         }
         
@@ -329,10 +330,12 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
     init_state = validated_schema.model_dump()
     
     # 3. Execute ADK workflow graph via the runner
+    invocation_id = str(uuid.uuid4())
     events = []
     async for event in runner.run_async(
         user_id=profile["user_id"],
         session_id=sim_id,
+        invocation_id=invocation_id,
         new_message=types.Content(role="user", parts=[types.Part(text="{}")]),
         state_delta=init_state
     ):
@@ -588,19 +591,26 @@ def inject_storm(simulation_id: str, payload: InjectStormRequest):
             raise HTTPException(status_code=404, detail="Simulation session not found.")
         session = sessions[simulation_id]
         
-        # Ensure active_storms dictionary is initialized
+        # Ensure custom_storms and active_storms dictionaries are initialized
+        if "custom_storms" not in session:
+            session["custom_storms"] = {}
         if "active_storms" not in session:
             session["active_storms"] = {}
             
-        session["active_storms"][payload.name] = {
+        storm_dict = {
             "storm_type": payload.storm_type,
             "name": payload.name,
-            "magnitude": payload.magnitude,
-            "heading_degrees": payload.heading_degrees
+            "force_vector": {
+                "magnitude": payload.magnitude,
+                "heading_degrees": payload.heading_degrees
+            },
+            "cost_friction_multiplier": 1.0
         }
+        session["custom_storms"][payload.name] = storm_dict
+        session["active_storms"][payload.name] = storm_dict
         
     return {
         "status": "success",
         "injected_storm": payload,
-        "active_custom_storms": list(session["active_storms"].keys())
+        "active_custom_storms": list(session["custom_storms"].keys())
     }
