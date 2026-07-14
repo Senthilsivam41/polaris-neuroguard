@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 from google.genai.types import Content, Part
 from google.adk.models.llm_response import LlmResponse
 from google.adk.agents.invocation_context import InvocationContext
@@ -47,29 +47,37 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
             except Exception:
                 break
 
-    @patch("google.adk.models.google_llm.Gemini.generate_content_async")
-    async def test_static_deadlock_detection(self, mock_generate_content_async):
-        """Verify static deadlock detection via tool call and callback state updates."""
-        async def mock_gen(*args, **kwargs):
-            content = Content(
-                role='model',
-                parts=[Part(text='{"has_deadlock": true, "conflicts": [{"constraint_a": "RIGID_TIMELINE", "constraint_b": "FREEZE_HEADCOUNT", "conflict_type": "static", "evidence": "Static conflict detected", "confidence": 1.0}]}')]
-            )
-            yield LlmResponse(
-                model_version='gemini-2.0-flash',
-                content=content
-            )
-            
-        mock_generate_content_async.side_effect = mock_gen
-
-        # Run the agent node via NodeRunner
+    async def test_static_deadlock_detection(self):
+        """Static deadlock detected by before_predictor_callback - LLM never called."""
+        # No LLM mock needed: before_agent_callback short-circuits before any LLM call.
         runner = NodeRunner(node=constraint_predictor, parent_ctx=self.ctx)
         child_ctx = await runner.run(node_input={})
-        
-        # Verify that the callback set the route to deadlock and zeroed the intent magnitude
+
         self.assertEqual(child_ctx.route, "deadlock")
         self.assertEqual(child_ctx.state["active_deadlocks"], [["RIGID_TIMELINE", "FREEZE_HEADCOUNT"]])
         self.assertEqual(child_ctx.state["intent_vector"].magnitude, 0.0)
+
+    async def test_static_shortcircuit_after_callback_not_called(self):
+        """Regression: after_predictor_callback must NOT run on the static short-circuit path.
+
+        ADK 2.3+: before_agent_callback returning non-null Content sets
+        ctx.end_invocation=True and the runner returns before invoking
+        after_agent_callback. This test fails if that contract is broken.
+        """
+        with patch(
+            "app.core.agents.after_predictor_callback",
+            new_callable=AsyncMock,
+        ) as mock_after:
+            runner = NodeRunner(node=constraint_predictor, parent_ctx=self.ctx)
+            child_ctx = await runner.run(node_input={})
+
+        # State and route must be set by before_predictor_callback alone
+        self.assertEqual(child_ctx.route, "deadlock")
+        self.assertEqual(child_ctx.state["active_deadlocks"], [["RIGID_TIMELINE", "FREEZE_HEADCOUNT"]])
+        self.assertEqual(child_ctx.state["intent_vector"].magnitude, 0.0)
+
+        # Core assertion: after_predictor_callback was never invoked
+        mock_after.assert_not_called()
 
     @patch("google.adk.models.google_llm.Gemini.generate_content_async")
     async def test_low_confidence_conflict_no_block(self, mock_generate_content_async):
