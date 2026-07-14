@@ -69,3 +69,14 @@ def get_redacted_api_key() -> str:
         return "********"
     return f"{GEMINI_API_KEY[:4]}...{GEMINI_API_KEY[-4:]}"
 
+
+from google.adk.workflow import RetryConfig
+
+WORKFLOW_RETRY_CONFIG = RetryConfig(
+    max_attempts=ADK_RETRY_ATTEMPTS,
+    initial_delay=ADK_RETRY_INITIAL_DELAY,
+    max_delay=ADK_RETRY_MAX_DELAY,
+    backoff_factor=ADK_RETRY_BACKOFF_FACTOR,
+)
+
+

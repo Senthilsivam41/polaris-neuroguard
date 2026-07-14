@@ -7,8 +7,8 @@ from google.adk.sessions import Session, InMemorySessionService
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.run_config import RunConfig
 from google.adk.workflow._node_runner import NodeRunner
-from app.core.state import SimulationStateSchema, Vector2D
-from app.core.agents import constraint_predictor, ConstraintConflictAssessment
+from app.core.state import SimulationStateSchema, Vector2D, get_typed_state
+from app.core.agents import constraint_predictor, before_predictor_callback, ConstraintConflictAssessment
 
 class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -16,7 +16,7 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
         self.session = Session(id="test_session", app_name="test_app", user_id="test_user")
         self.session.state = {
             "declared_constraints": ["RIGID_TIMELINE", "FREEZE_HEADCOUNT"],
-            "intent_vector": Vector2D(magnitude=10.0, heading_degrees=90.0),
+            "intent_vector": Vector2D(magnitude=10.0, heading_degrees=90.0).model_dump(),
             "active_deadlocks": []
         }
         self.ic = InvocationContext(
@@ -49,27 +49,19 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
 
     @patch("google.adk.models.google_llm.Gemini.generate_content_async")
     async def test_static_deadlock_detection(self, mock_generate_content_async):
-        """Verify static deadlock detection via tool call and callback state updates."""
-        async def mock_gen(*args, **kwargs):
-            content = Content(
-                role='model',
-                parts=[Part(text='{"has_deadlock": true, "conflicts": [{"constraint_a": "RIGID_TIMELINE", "constraint_b": "FREEZE_HEADCOUNT", "conflict_type": "static", "evidence": "Static conflict detected", "confidence": 1.0}]}')]
-            )
-            yield LlmResponse(
-                model_version='gemini-2.0-flash',
-                content=content
-            )
-            
-        mock_generate_content_async.side_effect = mock_gen
-
+        """Verify static deadlock detection via before_predictor_callback short-circuit without LLM call."""
         # Run the agent node via NodeRunner
         runner = NodeRunner(node=constraint_predictor, parent_ctx=self.ctx)
         child_ctx = await runner.run(node_input={})
         
-        # Verify that the callback set the route to deadlock and zeroed the intent magnitude
+        # Verify LLM was short-circuited (never invoked)
+        mock_generate_content_async.assert_not_called()
+
+        # Verify before_predictor_callback set the route to deadlock and zeroed the intent magnitude
+        typed_state = get_typed_state(child_ctx.state)
         self.assertEqual(child_ctx.route, "deadlock")
-        self.assertEqual(child_ctx.state["active_deadlocks"], [["RIGID_TIMELINE", "FREEZE_HEADCOUNT"]])
-        self.assertEqual(child_ctx.state["intent_vector"].magnitude, 0.0)
+        self.assertEqual(typed_state.active_deadlocks, [["RIGID_TIMELINE", "FREEZE_HEADCOUNT"]])
+        self.assertEqual(typed_state.intent_vector.magnitude, 0.0)
 
     @patch("google.adk.models.google_llm.Gemini.generate_content_async")
     async def test_low_confidence_conflict_no_block(self, mock_generate_content_async):
@@ -88,7 +80,7 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
 
         # Reset session state for no deadlocks and non-zero intent
         self.session.state["declared_constraints"] = ["RIGID_TIMELINE", "EXTEND_SCHEDULE"]
-        self.session.state["intent_vector"] = Vector2D(magnitude=10.0, heading_degrees=90.0)
+        self.session.state["intent_vector"] = Vector2D(magnitude=10.0, heading_degrees=90.0).model_dump()
         self.session.state["active_deadlocks"] = []
         self.ctx = CallbackContext(self.ic, node=constraint_predictor)
 
@@ -96,9 +88,10 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
         runner = NodeRunner(node=constraint_predictor, parent_ctx=self.ctx)
         child_ctx = await runner.run(node_input={})
 
+        typed_state = get_typed_state(child_ctx.state)
         self.assertEqual(child_ctx.route, "no_deadlock")
-        self.assertEqual(child_ctx.state["active_deadlocks"], [])
-        self.assertEqual(child_ctx.state["intent_vector"].magnitude, 10.0)
+        self.assertEqual(typed_state.active_deadlocks, [])
+        self.assertEqual(typed_state.intent_vector.magnitude, 10.0)
 
     @patch("google.adk.models.google_llm.Gemini.generate_content_async")
     async def test_high_confidence_semantic_deadlock(self, mock_generate_content_async):
@@ -116,7 +109,7 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
         mock_generate_content_async.side_effect = mock_gen
 
         self.session.state["declared_constraints"] = ["RIGID_TIMELINE", "EXTEND_SCHEDULE"]
-        self.session.state["intent_vector"] = Vector2D(magnitude=10.0, heading_degrees=90.0)
+        self.session.state["intent_vector"] = Vector2D(magnitude=10.0, heading_degrees=90.0).model_dump()
         self.session.state["active_deadlocks"] = []
         self.ctx = CallbackContext(self.ic, node=constraint_predictor)
 
@@ -124,6 +117,56 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
         runner = NodeRunner(node=constraint_predictor, parent_ctx=self.ctx)
         child_ctx = await runner.run(node_input={})
 
+        typed_state = get_typed_state(child_ctx.state)
         self.assertEqual(child_ctx.route, "deadlock")
-        self.assertEqual(child_ctx.state["active_deadlocks"], [["RIGID_TIMELINE", "EXTEND_SCHEDULE"]])
-        self.assertEqual(child_ctx.state["intent_vector"].magnitude, 0.0)
+        self.assertEqual(typed_state.active_deadlocks, [["RIGID_TIMELINE", "EXTEND_SCHEDULE"]])
+        self.assertEqual(typed_state.intent_vector.magnitude, 0.0)
+
+    @patch("google.adk.models.google_llm.Gemini.generate_content_async")
+    async def test_no_conflict(self, mock_generate_content_async):
+        """Verify clean execution when no static or semantic conflicts exist."""
+        async def mock_gen(*args, **kwargs):
+            content = Content(
+                role='model',
+                parts=[Part(text='{"has_deadlock": false, "conflicts": []}')]
+            )
+            yield LlmResponse(
+                model_version='gemini-2.0-flash',
+                content=content
+            )
+            
+        mock_generate_content_async.side_effect = mock_gen
+
+        self.session.state["declared_constraints"] = ["RIGID_TIMELINE"]
+        self.session.state["intent_vector"] = Vector2D(magnitude=10.0, heading_degrees=90.0).model_dump()
+        self.session.state["active_deadlocks"] = []
+        self.ctx = CallbackContext(self.ic, node=constraint_predictor)
+
+        runner = NodeRunner(node=constraint_predictor, parent_ctx=self.ctx)
+        child_ctx = await runner.run(node_input={})
+
+        typed_state = get_typed_state(child_ctx.state)
+        self.assertEqual(child_ctx.route, "no_deadlock")
+        self.assertEqual(typed_state.active_deadlocks, [])
+        self.assertEqual(typed_state.intent_vector.magnitude, 10.0)
+
+    @patch("google.adk.models.google_llm.Gemini.generate_content_async")
+    async def test_multiple_static_conflicts(self, mock_generate_content_async):
+        """Verify multiple static opposing constraint pairs are all detected and short-circuited."""
+        self.session.state["declared_constraints"] = [
+            "RIGID_TIMELINE", "FREEZE_HEADCOUNT", "REDUCE_COST", "EXPAND_SCOPE"
+        ]
+        self.session.state["intent_vector"] = Vector2D(magnitude=15.0, heading_degrees=180.0).model_dump()
+        self.session.state["active_deadlocks"] = []
+        self.ctx = CallbackContext(self.ic, node=constraint_predictor)
+
+        runner = NodeRunner(node=constraint_predictor, parent_ctx=self.ctx)
+        child_ctx = await runner.run(node_input={})
+
+        mock_generate_content_async.assert_not_called()
+        typed_state = get_typed_state(child_ctx.state)
+        self.assertEqual(child_ctx.route, "deadlock")
+        self.assertEqual(len(typed_state.active_deadlocks), 2)
+        self.assertIn(["RIGID_TIMELINE", "FREEZE_HEADCOUNT"], typed_state.active_deadlocks)
+        self.assertIn(["REDUCE_COST", "EXPAND_SCOPE"], typed_state.active_deadlocks)
+        self.assertEqual(typed_state.intent_vector.magnitude, 0.0)

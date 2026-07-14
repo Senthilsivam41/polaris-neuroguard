@@ -15,9 +15,21 @@ from app.core.simulation import (
     Vector2D as SimVector2D
 )
 
-BASE_BURN_RATE = 100.0
+from app.core.config import BASE_BURN_RATE, WORKFLOW_RETRY_CONFIG
 
-@node(retry_config=RetryConfig(max_attempts=3))
+class UnknownStormError(ValueError):
+    """Deterministic validation error raised when an unrecognized storm name is passed to weather_station."""
+    pass
+
+WORKFLOW_NODE_RETRY_CONFIG = RetryConfig(
+    max_attempts=WORKFLOW_RETRY_CONFIG.max_attempts,
+    initial_delay=WORKFLOW_RETRY_CONFIG.initial_delay,
+    max_delay=WORKFLOW_RETRY_CONFIG.max_delay,
+    backoff_factor=WORKFLOW_RETRY_CONFIG.backoff_factor,
+    exceptions_to_skip=[UnknownStormError]
+)
+
+@node(retry_config=WORKFLOW_NODE_RETRY_CONFIG)
 def weather_station(ctx: Context, active_storms: list[str], custom_storms: dict[str, StormModel]) -> list[StormModel]:
     # Enforce typed state contract at node entry
     typed_state = get_typed_state(ctx.state)
@@ -41,7 +53,7 @@ def weather_station(ctx: Context, active_storms: list[str], custom_storms: dict[
                 cost_friction_multiplier=preset.cost_friction_multiplier
             ))
         else:
-            raise ValueError(f"Unknown storm: {storm_name}")
+            raise UnknownStormError(f"Unknown storm: {storm_name}")
             
     update_typed_state(
         ctx.state,
@@ -50,7 +62,7 @@ def weather_station(ctx: Context, active_storms: list[str], custom_storms: dict[
     )
     return resolved
 
-@node(retry_config=RetryConfig(max_attempts=3))
+@node(retry_config=WORKFLOW_NODE_RETRY_CONFIG)
 def path_simulator(ctx: Context) -> dict:
     # 1. Enforce typed state contract at boundary entry
     state = get_typed_state(ctx.state)
@@ -181,16 +193,15 @@ def path_simulator(ctx: Context) -> dict:
 
 from app.core.agents import goal_analyzer, constraint_predictor
 
-goal_analyzer.retry_config = RetryConfig(max_attempts=3)
-constraint_predictor.retry_config = RetryConfig(max_attempts=3)
+goal_analyzer.retry_config = WORKFLOW_NODE_RETRY_CONFIG
+constraint_predictor.retry_config = WORKFLOW_NODE_RETRY_CONFIG
 
 simulation_workflow = Workflow(
     name="SimulationWorkflow",
     edges=[
         Edge(from_node=START, to_node=goal_analyzer),
         Edge(from_node=goal_analyzer, to_node=constraint_predictor, route="consistent"),
-        Edge(from_node=constraint_predictor, to_node=weather_station, route="no_deadlock"),
-        Edge(from_node=constraint_predictor, to_node=path_simulator, route="deadlock"),
+        Edge(from_node=constraint_predictor, to_node=weather_station),
         Edge(from_node=weather_station, to_node=path_simulator),
     ]
 )

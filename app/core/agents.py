@@ -1,21 +1,86 @@
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
+from google.genai import types as genai_types
 from app.core.config import GEMINI_MODEL
 from app.core.tools import logical_deadlocks_tool
+from app.core.simulation import check_logical_deadlocks
 from app.core.state import Vector2D as StateVector2D, get_typed_state, update_typed_state
 
 class ConflictDetail(BaseModel):
     constraint_a: str = Field(description="First constraint in conflict")
     constraint_b: str = Field(description="Second constraint in conflict")
-    conflict_type: str = Field(description="Type: static (from tool) or semantic/novel")
+    conflict_type: str = Field(default="semantic", description="Type: 'static' or 'semantic'")
     evidence: str = Field(description="Detailed reason or evidence for why these two constraints conflict under current conditions")
-    confidence: float = Field(description="Confidence score between 0.0 and 1.0")
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Confidence score between 0.0 and 1.0")
+
+    @model_validator(mode="after")
+    def validate_conflict_fields(self) -> 'ConflictDetail':
+        if self.conflict_type not in ("static", "semantic"):
+            self.conflict_type = "semantic"
+        self.confidence = max(0.0, min(1.0, float(self.confidence)))
+        return self
 
 class ConstraintConflictAssessment(BaseModel):
     has_deadlock: bool = Field(description="True if any active deadlock/conflict is detected (either deterministic static pair or high-confidence novel semantic conflict)")
     conflicts: List[ConflictDetail] = Field(default_factory=list, description="List of detected conflicting constraint pairs with evidence and confidence")
+
+async def before_predictor_callback(callback_context: CallbackContext) -> Optional[genai_types.Content]:
+    """
+    Deterministic SMT pre-execution check for static opposing constraint pairs.
+    If static deadlocks exist among declared_constraints, short-circuits the LLM call immediately
+    by returning a synthetic Content object and setting active_deadlocks, route, and intent vector stall.
+    """
+    current_state = get_typed_state(callback_context.state)
+    declared = current_state.declared_constraints
+    
+    deadlocks = check_logical_deadlocks(declared)
+    if not deadlocks:
+        return None  # Allow LLM to evaluate semantic conflicts
+        
+    deadlocks_list = [[a, b] for a, b in deadlocks]
+    
+    # Update state via typed boundary
+    intent = current_state.intent_vector
+    stalled_intent = StateVector2D(
+        magnitude=0.0,
+        heading_degrees=intent.heading_degrees
+    )
+    
+    update_typed_state(
+        callback_context.state,
+        {
+            "active_deadlocks": deadlocks_list,
+            "intent_vector": stalled_intent.model_dump(),
+        },
+        validate_transition=False
+    )
+    
+    # Set route
+    callback_context.route = "deadlock"
+    if hasattr(callback_context, "_event_actions") and callback_context._event_actions:
+        callback_context._event_actions.route = "deadlock"
+        
+    # Build schema-valid synthetic response Content
+    assessment = ConstraintConflictAssessment(
+        has_deadlock=True,
+        conflicts=[
+            ConflictDetail(
+                constraint_a=a,
+                constraint_b=b,
+                conflict_type="static",
+                evidence=f"Static deterministic conflict between opposing constraints: '{a}' and '{b}'.",
+                confidence=1.0
+            )
+            for a, b in deadlocks
+        ]
+    )
+    
+    return genai_types.Content(
+        role="model",
+        parts=[genai_types.Part(text=assessment.model_dump_json())]
+    )
 
 async def after_predictor_callback(callback_context: CallbackContext) -> None:
     # 1. Retrieve the last model response from this agent
@@ -45,18 +110,21 @@ async def after_predictor_callback(callback_context: CallbackContext) -> None:
         await _fallback_static_check(callback_context)
         return
 
-    # 3. Process the parsed assessment
+    # 3. Process the parsed assessment: only static or high-confidence (>= 0.7) semantic conflicts block
     deadlocks_list = []
+    has_blocking_conflict = False
     for c in assessment.conflicts:
         if c.conflict_type == "static" or c.confidence >= 0.7:
             deadlocks_list.append([c.constraint_a, c.constraint_b])
+            has_blocking_conflict = True
             
     # Persist detected deadlocks to session state via typed update
     delta: dict = {"active_deadlocks": deadlocks_list}
     
-    if assessment.has_deadlock or deadlocks_list:
+    if assessment.has_deadlock and has_blocking_conflict:
         callback_context.route = "deadlock"
-        callback_context._event_actions.route = "deadlock"
+        if hasattr(callback_context, "_event_actions") and callback_context._event_actions:
+            callback_context._event_actions.route = "deadlock"
         current_state = get_typed_state(callback_context.state)
         intent = current_state.intent_vector
         delta["intent_vector"] = StateVector2D(
@@ -65,7 +133,8 @@ async def after_predictor_callback(callback_context: CallbackContext) -> None:
         ).model_dump()
     else:
         callback_context.route = "no_deadlock"
-        callback_context._event_actions.route = "no_deadlock"
+        if hasattr(callback_context, "_event_actions") and callback_context._event_actions:
+            callback_context._event_actions.route = "no_deadlock"
 
     update_typed_state(callback_context.state, delta, validate_transition=False)
 
@@ -115,6 +184,7 @@ constraint_predictor = LlmAgent(
     instruction=CONSTRAINT_PREDICTOR_INSTRUCTION,
     tools=[logical_deadlocks_tool],
     output_schema=ConstraintConflictAssessment,
+    before_agent_callback=before_predictor_callback,
     after_agent_callback=after_predictor_callback
 )
 
