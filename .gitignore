@@ -35,3 +35,4 @@ htmlcov/
 .autoclaw/orchestrator/comms/registry.json
 .autoclaw/**
 .autoclaw/.*
+.autobuild/orchestrator/**

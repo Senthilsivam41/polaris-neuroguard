@@ -1,7 +1,9 @@
+import json
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
+from google.genai.types import Content, Part
 from app.core.config import GEMINI_MODEL
 from app.core.tools import logical_deadlocks_tool
 from app.core.state import Vector2D as StateVector2D, get_typed_state, update_typed_state
@@ -16,6 +18,66 @@ class ConflictDetail(BaseModel):
 class ConstraintConflictAssessment(BaseModel):
     has_deadlock: bool = Field(description="True if any active deadlock/conflict is detected (either deterministic static pair or high-confidence novel semantic conflict)")
     conflicts: List[ConflictDetail] = Field(default_factory=list, description="List of detected conflicting constraint pairs with evidence and confidence")
+
+async def before_predictor_callback(callback_context: CallbackContext) -> Optional[Content]:
+    """Enforce static constraint deadlocks before the LLM is invoked.
+
+    Calls check_logical_deadlocks() directly (pure Python, no tool round-trip).
+    If any static opposing pairs are active:
+      - Persists active_deadlocks in session state
+      - Zeros intent_vector magnitude
+      - Sets route to 'deadlock'
+      - Returns a synthetic Content to short-circuit the LLM (ADK 2.3+:
+        non-null return sets ctx.end_invocation=True; after_agent_callback
+        does NOT run)
+    If no static deadlocks: returns None so the LLM proceeds for semantic check.
+    """
+    declared = callback_context.state.get("declared_constraints", [])
+    static_deadlocks = check_logical_deadlocks(declared)
+
+    if not static_deadlocks:
+        return None
+
+    # Fully resolve state — after_predictor_callback will NOT run on this path
+    deadlocks_list = [[p1, p2] for p1, p2 in static_deadlocks]
+    callback_context.state["active_deadlocks"] = deadlocks_list
+
+    intent = callback_context.state.get("intent_vector")
+    if intent:
+        heading = (
+            intent.heading_degrees
+            if hasattr(intent, "heading_degrees")
+            else intent.get("heading_degrees", 0.0)
+        )
+        callback_context.state["intent_vector"] = StateVector2D(
+            magnitude=0.0,
+            heading_degrees=heading,
+        )
+
+    callback_context.route = "deadlock"
+    callback_context._event_actions.route = "deadlock"
+
+    # Return synthetic Content with valid ConstraintConflictAssessment JSON.
+    # process_llm_agent_output validates against output_schema even for
+    # before-callback events, so the text must parse as the schema.
+    assessment = {
+        "has_deadlock": True,
+        "conflicts": [
+            {
+                "constraint_a": p1,
+                "constraint_b": p2,
+                "conflict_type": "static",
+                "evidence": f"Static opposing pair detected: {p1} and {p2} are mutually exclusive.",
+                "confidence": 1.0,
+            }
+            for p1, p2 in static_deadlocks
+        ],
+    }
+    return Content(
+        role="model",
+        parts=[Part(text=json.dumps(assessment))],
+    )
+
 
 async def after_predictor_callback(callback_context: CallbackContext) -> None:
     # 1. Retrieve the last model response from this agent
@@ -115,7 +177,8 @@ constraint_predictor = LlmAgent(
     instruction=CONSTRAINT_PREDICTOR_INSTRUCTION,
     tools=[logical_deadlocks_tool],
     output_schema=ConstraintConflictAssessment,
-    after_agent_callback=after_predictor_callback
+    before_agent_callback=before_predictor_callback,
+    after_agent_callback=after_predictor_callback,
 )
 
 class GoalAnalysisResult(BaseModel):
