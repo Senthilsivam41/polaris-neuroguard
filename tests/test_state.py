@@ -4,7 +4,9 @@ from app.core.state import (
     SimulationStateSchema,
     GoalModel,
     Vector2D,
-    validate_state_transition
+    validate_state_transition,
+    get_typed_state,
+    update_typed_state
 )
 
 class TestStateValidation(unittest.TestCase):
@@ -73,25 +75,63 @@ class TestStateValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_state_transition(old_state, new_state_invalid)
 
-    def test_state_serialization_and_compatibility(self):
-        """Verify that state schema serializes/deserializes correctly and handles version compatibility."""
-        state = SimulationStateSchema(
-            simulation_id="test_sim",
-            goal_contract_version="2.0.0",
-            intent_vector=Vector2D(magnitude=15.0, heading_degrees=45.0)
-        )
+    def test_get_typed_state(self):
+        """Verify get_typed_state extracts and validates schema from dict or objects."""
+        raw = {"simulation_id": "sim_123", "accumulated_burn": 50.0}
+        typed = get_typed_state(raw)
+        self.assertIsInstance(typed, SimulationStateSchema)
+        self.assertEqual(typed.simulation_id, "sim_123")
+        self.assertEqual(typed.accumulated_burn, 50.0)
+
+    def test_update_typed_state_valid_and_invalid(self):
+        """Verify update_typed_state validates updates and transition integrity."""
+        from app.core.state import update_typed_state
         
-        # Serialize to dict (simulates database persistence)
-        serialized = state.model_dump()
-        self.assertEqual(serialized["simulation_id"], "test_sim")
-        self.assertEqual(serialized["goal_contract_version"], "2.0.0")
-        self.assertEqual(serialized["intent_vector"]["magnitude"], 15.0)
+        target = {"simulation_id": "sim_1", "accumulated_burn": 100.0}
         
-        # Deserialize from dict (simulates load from database)
-        deserialized = SimulationStateSchema.model_validate(serialized)
-        self.assertEqual(deserialized.simulation_id, "test_sim")
-        self.assertEqual(deserialized.goal_contract_version, "2.0.0")
-        self.assertEqual(deserialized.intent_vector.magnitude, 15.0)
+        # Valid update (accumulated burn increases)
+        updated = update_typed_state(target, {"accumulated_burn": 120.0})
+        self.assertEqual(updated.accumulated_burn, 120.0)
+        self.assertEqual(target["accumulated_burn"], 120.0)
+        
+        # Invalid update (out of bounds burn rate)
+        with self.assertRaises(ValidationError):
+            update_typed_state(target, {"accumulated_burn": -10.0})
+            
+        # Invalid transition (accumulated burn decreases)
+        with self.assertRaises(ValueError):
+            update_typed_state(target, {"accumulated_burn": 50.0}, validate_transition=True)
+
+    def test_node_context_state_boundary_enforcement(self):
+        """Verify state boundary enforcement over mock node context dictionary."""
+        from unittest.mock import MagicMock
+        from google.adk.sessions.state import State
+        from app.core.nodes import weather_station, path_simulator
+        from app.core.state import StormModel, Vector2D
+        
+        initial_state = SimulationStateSchema(
+            simulation_id="sim_node_test",
+            active_storms=[],
+            custom_storms={},
+            intent_vector=Vector2D(magnitude=10.0, heading_degrees=90.0)
+        ).model_dump()
+        
+        ctx = MagicMock()
+        ctx.state = State(value=initial_state, delta={})
+        
+        # weather_station boundary check
+        weather_station._func(ctx, active_storms=[], custom_storms={})
+        self.assertIn("resolved_storms", ctx.state)
+        
+        # path_simulator boundary check
+        res = path_simulator._func(ctx)
+        self.assertEqual(res["status"], "RUNNING")
+        self.assertGreater(ctx.state["accumulated_burn"], 0.0)
+        
+        # Illegal state delta update attempt (negative burn) throws ValidationError
+        with self.assertRaises(ValidationError):
+            update_typed_state(ctx.state, {"accumulated_burn": -5.0})
+
 
 
 

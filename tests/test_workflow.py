@@ -128,7 +128,12 @@ class TestWorkflow(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.ctx.state._schema.hitl_interrupted)
 
     async def test_path_simulator_deadlock_zeroes_velocity(self):
-        """Verify path simulator zeroes intent velocity magnitude if a deadlock exists."""
+        """Verify path simulator writes HITL state and returns PAUSED_BY_GUARDRAIL when deadlock active.
+
+        ADK 2.3: NodeInterruptedError raised inside @node is swallowed before state
+        deltas flush, so the node writes HITL state and returns PAUSED_BY_GUARDRAIL
+        instead of raising. Assertions read from child_ctx (the node's own context).
+        """
         state = SimulationStateSchema(
             intent_vector=Vector2D(magnitude=10.0, heading_degrees=0.0),
             resolved_storms=[StormModel(
@@ -142,20 +147,31 @@ class TestWorkflow(unittest.IsolatedAsyncioTestCase):
             active_deadlocks=[["RIGID_TIMELINE", "FREEZE_HEADCOUNT"]]
         )
         self._setup_context(state)
-        
+
         runner = NodeRunner(node=path_simulator, parent_ctx=self.ctx)
         child_ctx = await runner.run(node_input={})
-        
-        # Deadlock is present, so the simulation will interrupt
-        self.assertTrue(self.ctx.state._schema.hitl_interrupted)
-            
-        self.assertAlmostEqual(self.ctx.state._schema.resultant_vector.magnitude, 5.0)
-        self.assertAlmostEqual(self.ctx.state._schema.resultant_vector.heading_degrees, 90.0)
-        self.assertAlmostEqual(self.ctx.state._schema.current_position["x"], 5.0)
-        self.assertAlmostEqual(self.ctx.state._schema.current_position["y"], 0.0)
+
+        # Node must return PAUSED_BY_GUARDRAIL (not raise NodeInterruptedError)
+        self.assertIsNone(child_ctx.error)
+        self.assertEqual(child_ctx.output["status"], "PAUSED_BY_GUARDRAIL")
+
+        # HITL state written into child_ctx.state (state delta on the child context)
+        self.assertTrue(child_ctx.state["hitl_interrupted"])
+        self.assertIn("RIGID_TIMELINE", child_ctx.state["hitl_reason"])
+
+        # Intent dropped to 0, only storm vector (5.0 @ 90°) drives position
+        rv = child_ctx.output["resultant_vector"]
+        self.assertAlmostEqual(rv.magnitude, 5.0)
+        self.assertAlmostEqual(rv.heading_degrees, 90.0)
+        self.assertAlmostEqual(child_ctx.output["current_position"]["x"], 5.0)
+        self.assertAlmostEqual(child_ctx.output["current_position"]["y"], 0.0)
 
     async def test_path_simulator_collision_threat(self):
-        """Verify path simulator raises NodeInterruptedError on imminent iceberg collisions."""
+        """Verify path simulator writes HITL state and returns PAUSED_BY_GUARDRAIL on collision.
+
+        ADK 2.3: NodeInterruptedError raised inside @node is swallowed before state
+        deltas flush, so the node writes HITL state and returns PAUSED_BY_GUARDRAIL.
+        """
         custom_iceberg = IcebergModel(
             name="Iceberg Alpha",
             x=0.0,
@@ -170,11 +186,15 @@ class TestWorkflow(unittest.IsolatedAsyncioTestCase):
             custom_icebergs=[custom_iceberg]
         )
         self._setup_context(state)
-        
+
         runner = NodeRunner(node=path_simulator, parent_ctx=self.ctx)
         child_ctx = await runner.run(node_input={})
-        
-        self.assertIsInstance(child_ctx.error, NodeInterruptedError)
-        self.assertTrue(self.ctx.state._schema.hitl_interrupted)
-        self.assertIn("Iceberg Alpha", self.ctx.state._schema.hitl_reason)
-        self.assertIn("Iceberg Alpha", self.ctx.state._schema.collision_threats)
+
+        # Node must return PAUSED_BY_GUARDRAIL (not raise NodeInterruptedError)
+        self.assertIsNone(child_ctx.error)
+        self.assertEqual(child_ctx.output["status"], "PAUSED_BY_GUARDRAIL")
+
+        # HITL state written into child_ctx.state
+        self.assertTrue(child_ctx.state["hitl_interrupted"])
+        self.assertIn("Iceberg Alpha", child_ctx.state["hitl_reason"])
+        self.assertIn("Iceberg Alpha", child_ctx.output["collision_threats"])

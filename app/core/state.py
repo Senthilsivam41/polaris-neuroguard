@@ -130,3 +130,48 @@ def validate_state_transition(old_state: SimulationStateSchema, new_state: Simul
     if old_state.hitl_interrupted and not new_state.hitl_interrupted:
         if new_state.hitl_reason:
             raise ValueError("hitl_reason must be cleared when exiting interruption.")
+
+
+# 4. Typed boundary helper functions
+
+def get_typed_state(raw_state: Any) -> SimulationStateSchema:
+    """
+    Validate and return a SimulationStateSchema from a raw dict, Context.state, or ADK State object.
+    Enforces the full schema contract at boundary entry.
+    """
+    if hasattr(raw_state, "to_dict"):
+        state_dict = raw_state.to_dict()
+    elif hasattr(raw_state, "items"):
+        state_dict = dict(raw_state)
+    else:
+        state_dict = raw_state
+    return SimulationStateSchema.model_validate(state_dict)
+
+
+def update_typed_state(
+    state_target: Any,
+    delta: Dict[str, Any],
+    validate_transition: bool = True
+) -> SimulationStateSchema:
+    """
+    Apply a delta update to state_target (a Context.state dict-like object or python dict),
+    validate the resulting object against SimulationStateSchema and transition constraints,
+    and persist the validated fields back to state_target.
+    """
+    current_schema = get_typed_state(state_target)
+    merged = current_schema.model_dump()
+    merged.update(delta)
+    
+    new_schema = SimulationStateSchema.model_validate(merged)
+    
+    if validate_transition:
+        validate_state_transition(current_schema, new_schema)
+        
+    updated_dict = new_schema.model_dump()
+    if hasattr(state_target, "update"):
+        state_target.update(updated_dict)
+    elif isinstance(state_target, dict):
+        state_target.update(updated_dict)
+        
+    return new_schema
+

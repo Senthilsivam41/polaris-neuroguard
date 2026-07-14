@@ -12,7 +12,7 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.sessions.session import Session as AdkSession
 from google.genai import types
 from app.core.nodes import simulation_workflow
-from app.core.state import SimulationStateSchema
+from app.core.state import SimulationStateSchema, get_typed_state, update_typed_state, validate_state_transition
 
 router = APIRouter()
 
@@ -294,17 +294,20 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
         )
 
     # 1. Retrieve or create the ADK Session
-    try:
-        adk_session = runner.session_service.get_session(session_id=sim_id)
-    except Exception:
-        adk_session = runner.session_service.create_session(
-            id=sim_id,
+    adk_session = runner.session_service.get_session_sync(
+        app_name="polaris-neuroguard",
+        user_id=profile["user_id"],
+        session_id=sim_id
+    )
+    if adk_session is None:
+        adk_session = runner.session_service.create_session_sync(
             app_name="polaris-neuroguard",
-            user_id=profile["user_id"]
+            user_id=profile["user_id"],
+            session_id=sim_id
         )
         
-    # 2. Populate/initialize state variables
-    adk_session.state = {
+    # 2. Populate/initialize state variables using typed schema validation
+    init_delta = {
         "simulation_id": sim_id,
         "user_id": profile["user_id"],
         "risk_tolerance": profile["risk_tolerance"],
@@ -312,7 +315,7 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
         "intent_vector": payload.intent_vector.model_dump(),
         "declared_constraints": payload.declared_constraints,
         "active_storms": payload.active_storms,
-        "custom_storms": session.get("active_storms", {}),
+        "custom_storms": session.get("custom_storms", {}),
         "custom_icebergs": [ib.model_dump() for ib in payload.custom_icebergs] if payload.custom_icebergs else [],
         "current_position": session.get("current_position", {"x": 0.0, "y": 0.0}),
         "accumulated_burn": session.get("accumulated_burn", 0.0),
@@ -322,22 +325,26 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
         "hitl_reason": "",
         "hitl_telemetry_snapshot": None
     }
-    runner.session_service.update_session(adk_session)
+    validated_schema = update_typed_state(adk_session.state, init_delta, validate_transition=False)
+    init_state = validated_schema.model_dump()
     
     # 3. Execute ADK workflow graph via the runner
-    invocation_id = str(uuid.uuid4())
     events = []
     async for event in runner.run_async(
         user_id=profile["user_id"],
         session_id=sim_id,
-        invocation_id=invocation_id,
-        new_message=types.Content(role="user", parts=[types.Part(text="{}")])
+        new_message=types.Content(role="user", parts=[types.Part(text="{}")]),
+        state_delta=init_state
     ):
         events.append(event)
         
     # 4. Fetch the final updated state from the ADK Session
-    adk_session = runner.session_service.get_session(session_id=sim_id)
-    state = SimulationStateSchema.model_validate(adk_session.state)
+    adk_session = runner.session_service.get_session_sync(
+        app_name="polaris-neuroguard",
+        user_id=profile["user_id"],
+        session_id=sim_id
+    )
+    state = get_typed_state(adk_session.state)
     
     # 5. Determine active constraints and status
     active_constraints = []
@@ -430,14 +437,25 @@ async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest
     if not invocation_id:
         raise HTTPException(status_code=500, detail="No active invocation ID found for resume.")
         
-    # Build state delta to clear HITL flag and update decision
-    state_delta = {
+    # Fetch existing ADK session
+    adk_session = runner.session_service.get_session_sync(
+        app_name="polaris-neuroguard",
+        user_id=session["profile"]["user_id"],
+        session_id=simulation_id
+    )
+    if adk_session is None:
+        raise HTTPException(status_code=404, detail="ADK session not found.")
+
+    # Build and validate state delta to clear HITL flag and update decision
+    raw_delta = {
         "intent_vector": payload.intent_vector.model_dump(),
         "declared_constraints": payload.declared_constraints,
         "hitl_interrupted": False,
         "hitl_reason": "",
         "hitl_telemetry_snapshot": None
     }
+    validated_state = update_typed_state(adk_session.state, raw_delta, validate_transition=True)
+    state_delta = raw_delta
     
     # Run the workflow resuming from the invocation_id
     events = []
@@ -450,8 +468,12 @@ async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest
         events.append(event)
         
     # Fetch updated state
-    adk_session = runner.session_service.get_session(session_id=simulation_id)
-    state = SimulationStateSchema.model_validate(adk_session.state)
+    adk_session = runner.session_service.get_session_sync(
+        app_name="polaris-neuroguard",
+        user_id=session["profile"]["user_id"],
+        session_id=simulation_id
+    )
+    state = get_typed_state(adk_session.state)
     
     # Update local session
     profile = session["profile"]
