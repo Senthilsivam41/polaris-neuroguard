@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 from google.genai.types import Content, Part
 from google.adk.models.llm_response import LlmResponse
 from google.adk.agents.invocation_context import InvocationContext
@@ -62,6 +62,9 @@ class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(child_ctx.route, "deadlock")
         self.assertEqual(typed_state.active_deadlocks, [["RIGID_TIMELINE", "FREEZE_HEADCOUNT"]])
         self.assertEqual(typed_state.intent_vector.magnitude, 0.0)
+
+        # Core assertion: after_predictor_callback was never invoked
+        mock_after.assert_not_called()
 
     @patch("google.adk.models.google_llm.Gemini.generate_content_async")
     async def test_low_confidence_conflict_no_block(self, mock_generate_content_async):
