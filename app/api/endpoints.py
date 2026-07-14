@@ -764,3 +764,190 @@ def inject_storm(simulation_id: str, payload: InjectStormRequest):
         "injected_storm": payload,
         "active_custom_storms": list(session["custom_storms"].keys())
     }
+
+
+# 4. DRIFT-009 & DRIFT-010 API Models & Endpoints
+
+from app.core.amendment_workflow import (
+    amendment_workflow_service,
+    AmendmentNotFoundError,
+    UnauthorizedActorError,
+    InvalidWorkflowStateError,
+)
+
+class EvaluateDriftRequest(BaseModel):
+    actor_id: Optional[str] = Field(default=None, description="Optional actor/user ID performing evaluation.")
+
+class ConfirmAmendmentRequest(BaseModel):
+    actor_id: str = Field(..., description="Actor/User ID approving or rejecting the amendment.")
+    decision: str = Field(default="APPROVE", description="Decision action ('APPROVE' or 'REJECT').")
+    rationale: Optional[str] = Field(default="", description="Human decision rationale.")
+
+class ConfirmAmendmentResponse(BaseModel):
+    request_id: str = Field(..., description="Target change request ID.")
+    contract_id: str = Field(..., description="Target Goal Contract ID.")
+    active_contract_version: int = Field(..., description="Active contract version after decision processing.")
+    amendment_status: str = Field(..., description="Resulting amendment status (APPROVED or REJECTED).")
+    idempotent_replay: bool = Field(default=False, description="True if decision was already processed.")
+    new_contract_fingerprint: Optional[str] = Field(default=None, description="SHA-256 fingerprint if version updated.")
+    message: str = Field(..., description="Summary explanation of confirmation outcome.")
+
+
+@router.post(
+    "/simulation/change-requests/{request_id}/evaluate",
+    summary="Evaluate structured drift, rules, and semantic score for a submitted change request (DRIFT-009)"
+)
+def evaluate_change_request_drift(request_id: str, payload: Optional[EvaluateDriftRequest] = None):
+    """Evaluates request-intent drift for a previously submitted change request.
+    Returns comprehensive deterministic rule findings, semantic score, risk policy profile, and recommended action.
+    Does NOT mutate the active Goal Contract.
+    """
+    actor_id = payload.actor_id if payload else None
+    
+    # Locate simulation containing this request_id
+    target_sim_id = None
+    target_request_record = None
+    
+    with sessions_lock:
+        for sim_id, session in sessions.items():
+            crs = session.get("change_requests", {})
+            if request_id in crs:
+                target_sim_id = sim_id
+                target_request_record = crs[request_id]
+                session_ref = session
+                break
+                
+    if not target_sim_id or not target_request_record:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Change request ID '{request_id}' not found in any simulation session."
+        )
+
+    # Actor authorization check
+    owner_id = session_ref.get("profile", {}).get("user_id", "")
+    if actor_id and owner_id and actor_id != owner_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Actor ID '{actor_id}' does not match simulation owner '{owner_id}'."
+        )
+
+    try:
+        result = amendment_workflow_service.evaluate_change_request(session_ref, target_request_record)
+        return result
+    except StaleVersionError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "STALE_GOAL_CONTRACT_VERSION",
+                "message": str(e),
+                "contract_id": e.contract_id,
+                "current_version": e.current_version,
+                "expected_version": e.expected_version
+            }
+        )
+
+
+@router.get(
+    "/simulation/change-requests/{request_id}/evaluation",
+    summary="Retrieve evaluation results for a change request"
+)
+def get_change_request_evaluation(request_id: str):
+    """Fetches previously computed drift evaluation record for a change request."""
+    try:
+        return amendment_workflow_service.get_evaluation(request_id)
+    except AmendmentNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post(
+    "/simulation/change-requests/{request_id}/confirm",
+    response_model=ConfirmAmendmentResponse,
+    summary="Explicitly confirm or approve/reject a evaluated goal-amendment request (DRIFT-010)"
+)
+def confirm_change_request_amendment(request_id: str, payload: ConfirmAmendmentRequest):
+    """Processes explicit user or reviewer confirmation/rejection of a change request.
+    If APPROVED: Instantiates new GoalContract version N+1.
+    If REJECTED: Marks amendment status REJECTED without mutating the Goal Contract.
+    Idempotent on repeat invocations.
+    """
+    target_session = None
+    with sessions_lock:
+        for sim_id, session in sessions.items():
+            if request_id in session.get("change_requests", {}):
+                target_session = session
+                break
+
+    if not target_session:
+        raise HTTPException(status_code=404, detail=f"Change request ID '{request_id}' not found.")
+
+    try:
+        result = amendment_workflow_service.confirm_change_request(
+            sim_session=target_session,
+            request_id=request_id,
+            actor_id=payload.actor_id,
+            decision=payload.decision,
+            rationale=payload.rationale or ""
+        )
+        return result
+    except AmendmentNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except UnauthorizedActorError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except StaleVersionError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "STALE_GOAL_CONTRACT_VERSION",
+                "message": str(e),
+                "contract_id": e.contract_id,
+                "current_version": e.current_version,
+                "expected_version": e.expected_version
+            }
+        )
+    except InvalidWorkflowStateError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/simulation/change-requests/{request_id}/reject",
+    response_model=ConfirmAmendmentResponse,
+    summary="Convenience endpoint to explicitly reject a goal-amendment request (DRIFT-010)"
+)
+def reject_change_request_amendment(request_id: str, payload: ConfirmAmendmentRequest):
+    """Rejects a change request amendment without mutating active Goal Contract."""
+    payload.decision = "REJECT"
+    return confirm_change_request_amendment(request_id, payload)
+
+
+@router.get(
+    "/simulation/{simulation_id}/change-requests/history",
+    summary="Retrieve complete chronological change request and amendment history for a simulation"
+)
+def get_simulation_change_requests_history(simulation_id: str):
+    """Fetches full chronological array of change requests, drift evaluations, and amendment states."""
+    with sessions_lock:
+        if simulation_id not in sessions:
+            raise HTTPException(status_code=404, detail="Simulation session not found.")
+        session = sessions[simulation_id]
+        
+    change_requests = session.get("change_requests", {})
+    history = []
+    for req_id, req_record in change_requests.items():
+        eval_record = None
+        try:
+            eval_record = amendment_workflow_service.get_evaluation(req_id)
+        except AmendmentNotFoundError:
+            pass
+
+        history.append({
+            "request_record": req_record,
+            "evaluation": eval_record
+        })
+
+    return {
+        "simulation_id": simulation_id,
+        "active_contract_id": session.get("active_contract_id"),
+        "active_contract_version": session.get("active_contract_version"),
+        "total_change_requests": len(history),
+        "change_requests_history": history
+    }
