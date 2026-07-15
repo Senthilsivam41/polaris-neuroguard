@@ -4,9 +4,9 @@
 
 Polaris Neuro Guard is a strategic simulation platform built with Python and FastAPI. It models an enterprise initiative ("The Ship") steering toward a strategic objective ("The Mountain") through systemic constraints ("The Icebergs"). The platform calculates and prevents strategic drift under macro-environmental volatility using vector mechanics and deadlock detection.
 
-## 🎉 Milestone Achieved: Phases 1 to 4 Complete
+## 🎉 Milestone Achieved: Phases 1 to 5 Complete
 
-Polaris Neuro Guard has achieved a major development milestone with the complete implementation, integration, and test verification of **Phases 1 through 4**:
+Polaris Neuro Guard has achieved a major development milestone with the complete implementation, integration, and test verification of **Phases 1 through 5**:
 
 1. **Phase 1: Core Simulation Mechanics**
    - 2D vector physics engine calculating steering intent vs. resultant trajectory.
@@ -30,6 +30,21 @@ Polaris Neuro Guard has achieved a major development milestone with the complete
    - Durable, atomic `CheckpointService` with optimistic version locking and secret scrubbing.
    - Authoritative `PausedSessionPolicy` guarding state integrity during interruptions (`HTTP 409 SIMULATION_PAUSED`).
    - Versioned simulation resume endpoint (`POST /api/v1/simulation/{sim_id}/resume`) with idempotency and trace correlation.
+
+5. **Phase 5: Durable Persistence & Idempotency**
+   - SQLite-backed `SQLiteWorkflowStore` replacing volatile process-local memory caches.
+   - Atomic transactions with `BEGIN IMMEDIATE` serialize competing writes.
+   - Optimistic concurrency control using autoincrementing version checks.
+   - Scoped request idempotency for state mutation operations.
+
+## 🔄 Idempotency & Retry Policy
+
+For mission-critical operations (`evaluate-decision` and `resume`), Polaris Neuro Guard implements robust idempotency controls:
+- **Request Idempotency Key**: Scoped to the `request_id` or `resume_request_id` in the payload.
+- **Duplicate Request Detection**:
+  - If a duplicate request is received while the original is still running, the system returns `HTTP 409 Conflict` (`REQUEST_IN_PROGRESS`).
+  - If the original request has completed, the system replays the cached response without re-executing the ADK workflow graph.
+- **Payload Integrity**: If the same idempotency key is reused but with a different request payload, the system rejects it with `HTTP 409 Conflict` (`IDEMPOTENCY_KEY_REUSED`).
 
 ## 🏗️ Backend Layout
 
