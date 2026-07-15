@@ -172,5 +172,92 @@ class TestHITLInterruptions(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Alpha Berg", payload_dict["explanation"])
 
 
+    def test_drift_confirmation_interruption_payload(self):
+        """Verify InterruptionPayload can be built with DRIFT_REQUIRES_CONFIRMATION reason."""
+        payload = InterruptionPayload(
+            simulation_id="sim-drift-001",
+            invocation_id="inv-drift-001",
+            workflow_node="path_simulator",
+            reason=InterruptionReason.DRIFT_REQUIRES_CONFIRMATION,
+            severity="MEDIUM",
+            explanation="Drift exceeds confirmation threshold; explicit approval required.",
+            safe_telemetry_snapshot={"angular_drift_delta": 20.0},
+            goal_contract_id="contract-sim-drift-001",
+            active_contract_version=1,
+            change_request_id="cr-001",
+            required_resolution_action="Confirm the drift amendment to resume.",
+        )
+        self.assertEqual(payload.reason, InterruptionReason.DRIFT_REQUIRES_CONFIRMATION)
+        self.assertEqual(payload.status, "ACTIVE")
+        self.assertIsNotNone(payload.interruption_id)
+        self.assertEqual(payload.change_request_id, "cr-001")
+
+    def test_drift_hitl_review_interruption_payload(self):
+        """Verify InterruptionPayload can be built with DRIFT_REQUIRES_HITL_REVIEW reason."""
+        payload = InterruptionPayload(
+            simulation_id="sim-drift-002",
+            invocation_id="inv-drift-002",
+            workflow_node="path_simulator",
+            reason=InterruptionReason.DRIFT_REQUIRES_HITL_REVIEW,
+            severity="HIGH",
+            explanation="Drift exceeds HITL review threshold; authorized reviewer action required.",
+            safe_telemetry_snapshot={"angular_drift_delta": 45.0},
+            goal_contract_id="contract-sim-drift-002",
+            active_contract_version=2,
+            amendment_id="amend-001",
+            required_resolution_action="Authorized reviewer must approve or reject to resume.",
+        )
+        self.assertEqual(payload.reason, InterruptionReason.DRIFT_REQUIRES_HITL_REVIEW)
+        self.assertEqual(payload.amendment_id, "amend-001")
+        self.assertIsInstance(payload.created_at, str)
+
+    def test_policy_violation_interruption_payload(self):
+        """Verify POLICY_VIOLATION and AUTHORIZATION_FAILURE reasons exist and construct correctly."""
+        for reason in [InterruptionReason.POLICY_VIOLATION, InterruptionReason.AUTHORIZATION_FAILURE]:
+            payload = InterruptionPayload(
+                simulation_id="sim-pv-001",
+                invocation_id="inv-pv-001",
+                workflow_node="path_simulator",
+                reason=reason,
+                severity="CRITICAL",
+                explanation=f"Blocked by {reason.value}.",
+                safe_telemetry_snapshot={},
+                required_resolution_action="Contact administrator.",
+            )
+            self.assertEqual(payload.reason, reason)
+            self.assertEqual(payload.severity, "CRITICAL")
+
+    async def test_path_simulator_interruption_persists_state_before_raise(self):
+        """Verify state (hitl_interrupted, interruption_payload) is persisted before ADKInterruptionError is raised."""
+        state = SimulationStateSchema(
+            intent_vector=Vector2D(magnitude=10.0, heading_degrees=0.0),
+            resolved_storms=[],
+            current_position={"x": 5.0, "y": 5.0},
+            accumulated_burn=50.0,
+            active_deadlocks=[["RIGID_TIMELINE", "FREEZE_HEADCOUNT"]],
+            hitl_interrupted=False
+        )
+        self._setup_context(state)
+
+        runner = NodeRunner(node=path_simulator, parent_ctx=self.ctx)
+        child_ctx = await runner.run(node_input={})
+
+        # Node must be interrupted (output=None)
+        self.assertIsNone(child_ctx.output)
+
+        # State must have interruption_payload with required fields
+        payload_dict = child_ctx.state.get("interruption_payload")
+        self.assertIsNotNone(payload_dict)
+        self.assertIn("interruption_id", payload_dict)
+        self.assertIn("simulation_id", payload_dict)
+        self.assertIn("invocation_id", payload_dict)
+        self.assertIn("workflow_node", payload_dict)
+        self.assertIn("reason", payload_dict)
+        self.assertIn("severity", payload_dict)
+        self.assertIn("required_resolution_action", payload_dict)
+        self.assertIn("created_at", payload_dict)
+        self.assertEqual(payload_dict["status"], "ACTIVE")
+
+
 if __name__ == "__main__":
     unittest.main()

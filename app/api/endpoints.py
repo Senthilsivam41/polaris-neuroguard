@@ -23,6 +23,8 @@ from app.core.goal_contract_service import (
 )
 from app.core.hitl.paused_policy import enforce_paused_session_policy
 from app.core.hitl.resume_service import resume_service, ResumeRequestPayload
+from app.core.hitl.checkpoint_service import checkpoint_service
+from app.core.hitl.interruption import InterruptionPayload, InterruptionReason
 
 router = APIRouter()
 
@@ -496,14 +498,63 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
         
     # 6. Update local session store and history
     with sessions_lock:
-        session["current_position"] = state.current_position
-        session["accumulated_burn"] = state.accumulated_burn
-        session["hitl_interrupted"] = state.hitl_interrupted
-        session["hitl_reason"] = state.hitl_reason
-        session["hitl_telemetry_snapshot"] = state.hitl_telemetry_snapshot
         if state.hitl_interrupted:
+            # HITL-004: Do NOT mutate position/burn when paused. Preserve pre-interruption values.
+            # Only update HITL tracking state in the session.
+            session["hitl_interrupted"] = True
+            session["hitl_reason"] = state.hitl_reason
+            session["hitl_telemetry_snapshot"] = state.hitl_telemetry_snapshot
             session["paused_invocation_id"] = invocation_id
-            
+
+            # HITL-002: Atomically create durable checkpoint on interruption
+            int_payload_dict = state.interruption_payload or {}
+            int_reason_str = int_payload_dict.get("reason", InterruptionReason.UNKNOWN.value)
+            try:
+                int_reason = InterruptionReason(int_reason_str)
+            except ValueError:
+                int_reason = InterruptionReason.UNKNOWN
+
+            interruption_payload = InterruptionPayload(
+                interruption_id=int_payload_dict.get("interruption_id", f"int-{uuid.uuid4()}"),
+                simulation_id=sim_id,
+                invocation_id=invocation_id,
+                workflow_node=int_payload_dict.get("workflow_node", "path_simulator"),
+                reason=int_reason,
+                severity=int_payload_dict.get("severity", "HIGH"),
+                explanation=state.hitl_reason,
+                safe_telemetry_snapshot=state.hitl_telemetry_snapshot or {},
+                goal_contract_id=session.get("active_contract_id"),
+                active_contract_version=session.get("active_contract_version"),
+                required_resolution_action=int_payload_dict.get(
+                    "required_resolution_action",
+                    "Resolve blocking condition before resuming."
+                ),
+            )
+
+            try:
+                chk = checkpoint_service.create_checkpoint(
+                    simulation_id=sim_id,
+                    invocation_id=invocation_id,
+                    node_position=int_payload_dict.get("workflow_node", "path_simulator"),
+                    state_dict=dict(adk_session.state),
+                    interruption_payload=interruption_payload,
+                    active_contract_id=session.get("active_contract_id"),
+                    active_contract_version=session.get("active_contract_version"),
+                )
+                session["active_checkpoint_id"] = chk.checkpoint_id
+                session["active_checkpoint_version"] = chk.checkpoint_version
+                session["paused_interruption_id"] = interruption_payload.interruption_id
+            except Exception:
+                # Checkpoint creation failure is non-fatal for the response
+                pass
+        else:
+            # Only update position/burn when workflow completed without interruption
+            session["current_position"] = state.current_position
+            session["accumulated_burn"] = state.accumulated_burn
+            session["hitl_interrupted"] = False
+            session["hitl_reason"] = ""
+            session["hitl_telemetry_snapshot"] = None
+
         history_list = session.setdefault("history", [])
         turn_number = len(history_list) + 1
         history_list.append({

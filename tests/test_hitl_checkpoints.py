@@ -141,5 +141,60 @@ class TestHITLCheckpoints(unittest.TestCase):
             self.service.create_checkpoint("sim-600", "inv-600", "path_simulator", invalid_state, self.payload)
 
 
+    def test_idempotency_key_stored_on_checkpoint(self):
+        """Verify idempotency key is stored and retrievable on checkpoint."""
+        chk = self.service.create_checkpoint(
+            simulation_id="sim-700",
+            invocation_id="inv-700",
+            node_position="path_simulator",
+            state_dict=self.state_dict,
+            interruption_payload=self.payload,
+            idempotency_key="req-idem-abc-123"
+        )
+        self.assertEqual(chk.idempotency_key, "req-idem-abc-123")
+        retrieved = self.service.get_by_id(chk.checkpoint_id)
+        self.assertEqual(retrieved.idempotency_key, "req-idem-abc-123")
+
+    def test_checkpoint_history_safe_list_no_secrets(self):
+        """Verify checkpoint history list never contains secret/prohibited keys."""
+        import copy
+        raw_state = copy.deepcopy(self.state_dict)
+        raw_state["api_key"] = "should_be_redacted"
+        raw_state["token"] = "jwt_secret_value"
+
+        chk = self.service.create_checkpoint(
+            simulation_id="sim-800",
+            invocation_id="inv-800",
+            node_position="path_simulator",
+            state_dict=raw_state,
+            interruption_payload=self.payload
+        )
+
+        history = self.service.get_checkpoint_history("sim-800")
+        self.assertEqual(len(history), 1)
+        validated = history[0].validated_state
+        self.assertNotIn("api_key", validated)
+        self.assertNotIn("token", validated)
+
+    def test_completed_nodes_cached_in_checkpoint(self):
+        """Verify completed_nodes dict is stored in checkpoint to prevent side-effect replay."""
+        completed = {
+            "weather_station": [{"name": "Storm A", "cost_friction_multiplier": 1.5}],
+            "goal_analyzer": {"is_consistent": True},
+        }
+        chk = self.service.create_checkpoint(
+            simulation_id="sim-900",
+            invocation_id="inv-900",
+            node_position="path_simulator",
+            state_dict=self.state_dict,
+            interruption_payload=self.payload,
+            completed_nodes=completed
+        )
+        retrieved = self.service.get_by_id(chk.checkpoint_id)
+        self.assertIn("weather_station", retrieved.completed_nodes)
+        self.assertIn("goal_analyzer", retrieved.completed_nodes)
+        self.assertEqual(retrieved.completed_nodes["weather_station"][0]["name"], "Storm A")
+
+
 if __name__ == "__main__":
     unittest.main()

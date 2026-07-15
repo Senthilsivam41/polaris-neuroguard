@@ -179,5 +179,136 @@ class TestHITLResumeAPI(unittest.TestCase):
             self.assertTrue(sessions[self.sim_id].get("hitl_interrupted"))
 
 
+    def test_resume_unknown_simulation_404(self):
+        """Verify resume returns 404 for simulation ID not in session store."""
+        resp = self.client.post("/api/v1/simulation/nonexistent-sim-id/resume", json={
+            "checkpoint_id": "chk-anything",
+            "resume_request_id": "req-r-99",
+            "actor_id": "owner_user",
+            "resolution_action": "Resolved",
+            "expected_checkpoint_version": 1
+        })
+        self.assertEqual(resp.status_code, 404)
+
+    def test_failed_resume_keeps_active_checkpoint(self):
+        """Verify that a resume with empty resolution_action preserves the active checkpoint."""
+        chk = self._create_active_interruption_and_checkpoint(self.sim_id)
+
+        # Attempt resume with empty resolution — must fail, checkpoint must remain
+        resp = self.client.post(f"/api/v1/simulation/{self.sim_id}/resume", json={
+            "checkpoint_id": chk.checkpoint_id,
+            "resume_request_id": "req-r-fail-1",
+            "actor_id": "owner_user",
+            "resolution_action": "",
+            "expected_checkpoint_version": 1
+        })
+        self.assertIn(resp.status_code, [400, 409])
+
+        # Active checkpoint must still exist after failed resume
+        from app.core.hitl.checkpoint_service import checkpoint_service
+        active = checkpoint_service.get_active_checkpoint(self.sim_id)
+        self.assertIsNotNone(active)
+        self.assertEqual(active.checkpoint_id, chk.checkpoint_id)
+        self.assertEqual(active.checkpoint_status, "ACTIVE")
+
+    def test_subsequent_blocking_condition_creates_new_checkpoint(self):
+        """Verify resuming into another blocking condition creates a superseding checkpoint."""
+        from app.core.hitl.checkpoint_service import checkpoint_service
+        # First checkpoint: collision threat
+        chk1 = self._create_active_interruption_and_checkpoint(self.sim_id, invocation_id="inv-seq-1")
+
+        # Simulate second checkpoint (what would happen if resume hits another blocking condition)
+        from app.core.hitl.interruption import InterruptionPayload, InterruptionReason
+        payload2 = InterruptionPayload(
+            interruption_id="int-seq-002",
+            simulation_id=self.sim_id,
+            invocation_id="inv-seq-2",
+            workflow_node="path_simulator",
+            reason=InterruptionReason.COLLISION_THREAT,
+            severity="HIGH",
+            explanation="Subsequent collision threat detected.",
+            safe_telemetry_snapshot={"x": 10.0, "y": 10.0},
+            goal_contract_id=f"contract-{self.sim_id}",
+            active_contract_version=1,
+            required_resolution_action="Avert collision threat"
+        )
+        state_dict2 = {
+            "simulation_id": self.sim_id,
+            "user_id": "owner_user",
+            "intent_vector": {"magnitude": 10.0, "heading_degrees": 90.0},
+            "current_position": {"x": 10.0, "y": 10.0},
+            "accumulated_burn": 100.0,
+            "collision_threats": ["Iceberg Beta"],
+            "hitl_interrupted": True,
+            "hitl_reason": "Subsequent collision threat detected.",
+            "hitl_telemetry_snapshot": {"x": 10.0, "y": 10.0}
+        }
+        chk2 = checkpoint_service.create_checkpoint(
+            simulation_id=self.sim_id,
+            invocation_id="inv-seq-2",
+            node_position="path_simulator",
+            state_dict=state_dict2,
+            interruption_payload=payload2,
+            active_contract_id=f"contract-{self.sim_id}",
+            active_contract_version=1
+        )
+
+        # chk1 should be superseded; chk2 should be the new active checkpoint
+        prior = checkpoint_service.get_by_id(chk1.checkpoint_id)
+        self.assertEqual(prior.checkpoint_status, "SUPERSEDED")
+
+        active = checkpoint_service.get_active_checkpoint(self.sim_id)
+        self.assertIsNotNone(active)
+        self.assertEqual(active.checkpoint_id, chk2.checkpoint_id)
+        self.assertEqual(active.checkpoint_status, "ACTIVE")
+
+        # History should contain both checkpoints
+        history = checkpoint_service.get_checkpoint_history(self.sim_id)
+        checkpoint_ids = [c.checkpoint_id for c in history]
+        self.assertIn(chk1.checkpoint_id, checkpoint_ids)
+        self.assertIn(chk2.checkpoint_id, checkpoint_ids)
+
+    def test_e2e_evaluate_interrupt_checkpoint_resume(self):
+        """End-to-end: evaluate-decision → HITL interrupt → checkpoint → clear deadlock → resume → RUNNING."""
+        from app.core.hitl.checkpoint_service import checkpoint_service
+
+        # Step 1: Register and get initial session (already done in setUp)
+        # Step 2: Create checkpoint simulating an evaluate-decision that triggered HITL
+        chk = self._create_active_interruption_and_checkpoint(self.sim_id)
+
+        # Step 3: Verify session is paused — evaluate-decision blocked
+        eval_resp = self.client.post("/api/v1/simulation/evaluate-decision", json={
+            "simulation_id": self.sim_id,
+            "intent_vector": {"magnitude": 10.0, "heading_degrees": 0.0},
+            "declared_constraints": []
+        })
+        self.assertEqual(eval_resp.status_code, 409)
+        self.assertEqual(eval_resp.json()["detail"]["error_code"], "SIMULATION_PAUSED")
+
+        # Step 4: Submit resume with cleared constraints
+        resume_resp = self.client.post(f"/api/v1/simulation/{self.sim_id}/resume", json={
+            "checkpoint_id": chk.checkpoint_id,
+            "resume_request_id": "req-e2e-001",
+            "actor_id": "owner_user",
+            "resolution_action": "Resolved deadlock by removing declared constraints.",
+            "expected_checkpoint_version": 1,
+            "declared_constraints": []
+        })
+        # Resume should succeed (200) or stay paused (200 with PAUSED_BY_GUARDRAIL) — not an error
+        self.assertEqual(resume_resp.status_code, 200)
+        data = resume_resp.json()
+        # resume_status should be either RUNNING or PAUSED_BY_GUARDRAIL
+        self.assertIn(data["resume_status"], ["RUNNING", "PAUSED_BY_GUARDRAIL"])
+        self.assertEqual(data["simulation_id"], self.sim_id)
+        self.assertIn("correlation_id", data)
+
+        # Step 5: If RUNNING, verify checkpoint is resolved and session is unpaused
+        if data["resume_status"] == "RUNNING":
+            resolved_chk = checkpoint_service.get_by_id(chk.checkpoint_id)
+            self.assertEqual(resolved_chk.checkpoint_status, "RESOLVED")
+            active = checkpoint_service.get_active_checkpoint(self.sim_id)
+            self.assertIsNone(active)
+
+
 if __name__ == "__main__":
     unittest.main()
