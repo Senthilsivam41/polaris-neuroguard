@@ -4,12 +4,14 @@ from app.main import app
 from app.api.endpoints import sessions, sessions_lock
 from app.core.hitl.checkpoint_service import checkpoint_service
 from app.core.hitl.interruption import InterruptionPayload, InterruptionReason
+from app.core.persistence import workflow_store
 
 
 class TestPausedSessionBehavior(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
         checkpoint_service.clear()
+        workflow_store.clear()
         with sessions_lock:
             sessions.clear()
 

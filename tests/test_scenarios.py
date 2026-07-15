@@ -12,7 +12,9 @@ class TestSimulationScenarios(unittest.TestCase):
         self.client = TestClient(app)
         # Clear in-memory session store before each test scenario
         from app.api.endpoints import sessions
+        from app.core.persistence import workflow_store
         sessions.clear()
+        workflow_store.clear()
 
         # Hermetic LLM patch for scenario tests
         async def mock_generate(self_inner, llm_request, stream=False):

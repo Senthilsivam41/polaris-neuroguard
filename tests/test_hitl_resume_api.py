@@ -5,6 +5,7 @@ from app.api.endpoints import sessions, sessions_lock
 from app.core.hitl.checkpoint_service import checkpoint_service
 from app.core.hitl.interruption import InterruptionPayload, InterruptionReason
 from app.core.hitl.resume_service import resume_service
+from app.core.persistence import workflow_store
 
 
 class TestHITLResumeAPI(unittest.TestCase):
@@ -12,6 +13,7 @@ class TestHITLResumeAPI(unittest.TestCase):
         self.client = TestClient(app)
         checkpoint_service.clear()
         resume_service.clear()
+        workflow_store.clear()
         with sessions_lock:
             sessions.clear()
 

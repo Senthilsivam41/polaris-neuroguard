@@ -4,6 +4,7 @@ from app.main import app
 from app.api.endpoints import sessions
 from app.core.goal_contract_service import goal_contract_repo
 from app.core.amendment_workflow import amendment_workflow_service
+from app.core.persistence import workflow_store
 
 
 class TestAmendmentWorkflow(unittest.TestCase):
@@ -12,6 +13,7 @@ class TestAmendmentWorkflow(unittest.TestCase):
         sessions.clear()
         goal_contract_repo.clear()
         amendment_workflow_service.clear()
+        workflow_store.clear()
 
         # Registration baseline
         self.reg_payload = {

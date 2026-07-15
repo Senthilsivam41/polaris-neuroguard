@@ -11,7 +11,9 @@ class TestPolarisAPI(unittest.TestCase):
         self.client = TestClient(app)
         # Clear in-memory session store before each test to maintain isolation
         from app.api.endpoints import sessions
+        from app.core.persistence import workflow_store
         sessions.clear()
+        workflow_store.clear()
 
         # Global hermetic LLM mock for API endpoint integration tests
         async def mock_generate(self_inner, llm_request, stream=False):

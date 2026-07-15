@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.api.endpoints import sessions
 from app.core.goal_contract_service import goal_contract_repo
+from app.core.persistence import workflow_store
 
 
 class TestChangeRequestAPI(unittest.TestCase):
@@ -10,6 +11,7 @@ class TestChangeRequestAPI(unittest.TestCase):
         self.client = TestClient(app)
         sessions.clear()
         goal_contract_repo.clear()
+        workflow_store.clear()
 
         # Helper registration payload
         self.reg_payload = {
