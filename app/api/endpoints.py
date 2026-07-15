@@ -25,6 +25,11 @@ from app.core.hitl.paused_policy import enforce_paused_session_policy
 from app.core.hitl.resume_service import resume_service, ResumeRequestPayload
 from app.core.hitl.checkpoint_service import checkpoint_service
 from app.core.hitl.interruption import InterruptionPayload, InterruptionReason
+from app.core.persistence import (
+    workflow_store,
+    VersionConflictError,
+    IdempotencyConflictError,
+)
 
 router = APIRouter()
 
@@ -126,6 +131,7 @@ class EvaluateDecisionRequest(BaseModel):
     )
     custom_icebergs: Optional[List[IcebergModel]] = Field(None, description="Optional custom icebergs to inject")
     custom_opposing_pairs: Optional[List[Tuple[str, str]]] = Field(None, description="Optional custom opposing constraint pairs to evaluate")
+    request_id: Optional[str] = Field(None, description="Optional idempotency key for this evaluation")
 
 class ResumeSimulationRequest(BaseModel):
     checkpoint_id: str = Field(..., description="Target active checkpoint ID to resume from")
@@ -240,9 +246,39 @@ class InjectStormResponse(BaseModel):
     active_custom_storms: List[str] = Field(..., description="List of all currently registered custom storm names")
 
 
-# 3. In-Memory Session Store
+# 3. Durable Session Store (SQLite); cache is retained only for legacy callers/tests.
 sessions: Dict[str, Dict[str, Any]] = {}
 sessions_lock = threading.Lock()
+
+
+def _load_session(simulation_id: str) -> Tuple[Dict[str, Any], int]:
+    """Read the durable session; retain the legacy cache only for test compatibility."""
+    stored = workflow_store.get_session(simulation_id)
+    if stored is None:
+        # Existing callers/tests may seed the legacy mapping directly.
+        with sessions_lock:
+            legacy = sessions.get(simulation_id)
+        if legacy is None:
+            raise HTTPException(status_code=404, detail="Simulation session not found.")
+        try:
+            version = workflow_store.create_session(simulation_id, legacy)
+        except Exception:
+            stored = workflow_store.get_session(simulation_id)
+            if stored is None:
+                raise
+            return stored
+        return legacy.copy(), version
+    return stored
+
+
+def _save_session(simulation_id: str, session: Dict[str, Any], version: int) -> int:
+    try:
+        next_version = workflow_store.save_session(simulation_id, session, version)
+    except VersionConflictError as exc:
+        raise HTTPException(status_code=409, detail={"error_code": "SESSION_VERSION_CONFLICT", "message": str(exc)}) from exc
+    with sessions_lock:
+        sessions[simulation_id] = session
+    return next_version
 
 
 @router.get(
@@ -289,20 +325,22 @@ def register_simulation(profile: UserProfile):
     )
     saved_contract = goal_contract_repo.create_baseline_contract(baseline_contract)
 
+    session_data = {
+        "profile": profile.model_dump(),
+        "destination": {"x": 0.0, "y": 1000.0},
+        "current_position": {"x": 0.0, "y": 0.0},
+        "accumulated_burn": 0.0,
+        "active_storms": {},
+        "custom_storms": {},
+        "history": [],
+        "active_contract_id": saved_contract.contract_id,
+        "active_contract_version": saved_contract.contract_version,
+        "active_contract_fingerprint": saved_contract.content_fingerprint,
+        "change_requests": {}
+    }
+    workflow_store.create_session(sim_id, session_data)
     with sessions_lock:
-        sessions[sim_id] = {
-            "profile": profile.model_dump(),
-            "destination": {"x": 0.0, "y": 1000.0},
-            "current_position": {"x": 0.0, "y": 0.0},
-            "accumulated_burn": 0.0,
-            "active_storms": {},
-            "custom_storms": {},
-            "history": [],
-            "active_contract_id": saved_contract.contract_id,
-            "active_contract_version": saved_contract.contract_version,
-            "active_contract_fingerprint": saved_contract.content_fingerprint,
-            "change_requests": {}
-        }
+        sessions[sim_id] = session_data
         
     return {
         "simulation_id": sim_id,
@@ -324,10 +362,7 @@ def submit_change_request(payload: ChangeRequestPayload):
     """
     sim_id = payload.simulation_id
     
-    with sessions_lock:
-        if sim_id not in sessions:
-            raise HTTPException(status_code=404, detail="Simulation session not found.")
-        session = sessions[sim_id]
+    session, session_version = _load_session(sim_id)
         
     profile = session.get("profile", {})
     owner_id = profile.get("user_id", "")
@@ -384,17 +419,17 @@ def submit_change_request(payload: ChangeRequestPayload):
     }
 
     # Store request record without mutating the goal contract
-    with sessions_lock:
-        change_requests[payload.request_id] = {
-            "request_id": payload.request_id,
-            "raw_text": payload.natural_language_request,
-            "expected_version": payload.expected_goal_contract_version,
-            "resolved_active_version": active_contract.contract_version,
-            "explicit_change_intent": payload.explicit_change_intent,
-            "actor": payload.actor_id or owner_id,
-            "received_timestamp": received_at,
-            "response": response_data
-        }
+    change_requests[payload.request_id] = {
+        "request_id": payload.request_id,
+        "raw_text": payload.natural_language_request,
+        "expected_version": payload.expected_goal_contract_version,
+        "resolved_active_version": active_contract.contract_version,
+        "explicit_change_intent": payload.explicit_change_intent,
+        "actor": payload.actor_id or owner_id,
+        "received_timestamp": received_at,
+        "response": response_data
+    }
+    _save_session(sim_id, session, session_version)
 
     return response_data
 
@@ -411,11 +446,18 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
     and registers human-in-the-loop (HITL) alerts if failure thresholds are violated.
     """
     sim_id = payload.simulation_id
-    
-    with sessions_lock:
-        if sim_id not in sessions:
-            raise HTTPException(status_code=404, detail="Simulation session not found.")
-        session = sessions[sim_id]
+    request_id = payload.request_id or str(uuid.uuid4())
+    idempotency_payload = payload.model_dump(exclude={"request_id"})
+    try:
+        replay = workflow_store.reserve_idempotency("evaluate", sim_id, request_id, idempotency_payload)
+    except IdempotencyConflictError as exc:
+        raise HTTPException(status_code=409, detail={"error_code": "IDEMPOTENCY_KEY_REUSED", "message": str(exc)}) from exc
+    except VersionConflictError as exc:
+        raise HTTPException(status_code=409, detail={"error_code": "REQUEST_IN_PROGRESS", "message": str(exc)}) from exc
+    if replay is not None:
+        return EvaluateDecisionResponse.model_validate(replay)
+
+    session, session_version = _load_session(sim_id)
         
     profile = session["profile"]
     budget_limit = profile.get("anchor_goal", {}).get("budget_limit_usd", float("inf"))
@@ -496,9 +538,8 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
             telemetry_snapshot=state.hitl_telemetry_snapshot
         )
         
-    # 6. Update local session store and history
-    with sessions_lock:
-        if state.hitl_interrupted:
+    # 6. Update durable session and history using optimistic concurrency.
+    if state.hitl_interrupted:
             # HITL-004: Do NOT mutate position/burn when paused. Preserve pre-interruption values.
             # Only update HITL tracking state in the session.
             session["hitl_interrupted"] = True
@@ -547,7 +588,7 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
             except Exception:
                 # Checkpoint creation failure is non-fatal for the response
                 pass
-        else:
+    else:
             # Only update position/burn when workflow completed without interruption
             session["current_position"] = state.current_position
             session["accumulated_burn"] = state.accumulated_burn
@@ -555,9 +596,9 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
             session["hitl_reason"] = ""
             session["hitl_telemetry_snapshot"] = None
 
-        history_list = session.setdefault("history", [])
-        turn_number = len(history_list) + 1
-        history_list.append({
+    history_list = session.setdefault("history", [])
+    turn_number = len(history_list) + 1
+    history_list.append({
             "turn_number": turn_number,
             "telemetry_snapshot": {
                 "current_position": state.current_position,
@@ -579,9 +620,10 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
                 "collision_threats": state.collision_threats,
                 "active_constraints": active_constraints
             }
-        })
+    })
+    _save_session(sim_id, session, session_version)
         
-    return EvaluateDecisionResponse(
+    response = EvaluateDecisionResponse(
         simulation_id=sim_id,
         telemetry=TelemetryModel(
             current_position=state.current_position,
@@ -600,6 +642,8 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
         status=status,
         active_constraints=active_constraints
     )
+    workflow_store.complete_idempotency("evaluate", sim_id, request_id, response.model_dump())
+    return response
 
 @router.post(
     "/simulation/{simulation_id}/resume",
@@ -607,10 +651,19 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
     summary="Resume simulation from a paused state"
 )
 async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest):
-    with sessions_lock:
-        if simulation_id not in sessions:
-            raise HTTPException(status_code=404, detail="Simulation session not found.")
-        session = sessions[simulation_id]
+    idempotency_payload = payload.model_dump(exclude={"resume_request_id"})
+    try:
+        replay = workflow_store.reserve_idempotency(
+            "resume", simulation_id, payload.resume_request_id, idempotency_payload
+        )
+    except IdempotencyConflictError as exc:
+        raise HTTPException(status_code=409, detail={"error_code": "IDEMPOTENCY_KEY_REUSED", "message": str(exc)}) from exc
+    except VersionConflictError as exc:
+        raise HTTPException(status_code=409, detail={"error_code": "REQUEST_IN_PROGRESS", "message": str(exc)}) from exc
+    if replay is not None:
+        return ResumeSimulationResponse.model_validate(replay)
+
+    session, session_version = _load_session(simulation_id)
 
     domain_payload = ResumeRequestPayload(
         checkpoint_id=payload.checkpoint_id,
@@ -624,12 +677,15 @@ async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest
         declared_constraints=payload.declared_constraints,
     )
 
-    return await resume_service.execute_resume(
+    response = await resume_service.execute_resume(
         simulation_id=simulation_id,
         payload=domain_payload,
         sim_session=session,
         runner=runner
     )
+    _save_session(simulation_id, session, session_version)
+    workflow_store.complete_idempotency("resume", simulation_id, payload.resume_request_id, response)
+    return response
 
 
 
@@ -640,10 +696,7 @@ async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest
 )
 def get_simulation_history(simulation_id: str):
     """Fetches the complete historical array of telemetry, drift, constraints, and events for a simulation session."""
-    with sessions_lock:
-        if simulation_id not in sessions:
-            raise HTTPException(status_code=404, detail="Simulation session not found.")
-        session = sessions[simulation_id]
+    session, _ = _load_session(simulation_id)
         
     history_list = session.get("history", [])
     return {
@@ -662,28 +715,26 @@ def inject_storm(simulation_id: str, payload: InjectStormRequest):
     """Injects a new custom environmental storm or updates an existing one for the session.
     Subsequent evaluation turns will process this storm vector if included in active_storms.
     """
-    with sessions_lock:
-        if simulation_id not in sessions:
-            raise HTTPException(status_code=404, detail="Simulation session not found.")
-        session = sessions[simulation_id]
-        
-        # Ensure custom_storms and active_storms dictionaries are initialized
-        if "custom_storms" not in session:
-            session["custom_storms"] = {}
-        if "active_storms" not in session:
-            session["active_storms"] = {}
-            
-        storm_dict = {
-            "storm_type": payload.storm_type,
-            "name": payload.name,
-            "force_vector": {
-                "magnitude": payload.magnitude,
-                "heading_degrees": payload.heading_degrees
-            },
-            "cost_friction_multiplier": 1.0
-        }
-        session["custom_storms"][payload.name] = storm_dict
-        session["active_storms"][payload.name] = storm_dict
+    session, session_version = _load_session(simulation_id)
+
+    # Ensure custom_storms and active_storms dictionaries are initialized
+    if "custom_storms" not in session:
+        session["custom_storms"] = {}
+    if "active_storms" not in session:
+        session["active_storms"] = {}
+
+    storm_dict = {
+        "storm_type": payload.storm_type,
+        "name": payload.name,
+        "force_vector": {
+            "magnitude": payload.magnitude,
+            "heading_degrees": payload.heading_degrees
+        },
+        "cost_friction_multiplier": 1.0
+    }
+    session["custom_storms"][payload.name] = storm_dict
+    session["active_storms"][payload.name] = storm_dict
+    _save_session(simulation_id, session, session_version)
         
     return {
         "status": "success",
@@ -734,14 +785,13 @@ def evaluate_change_request_drift(request_id: str, payload: Optional[EvaluateDri
     target_sim_id = None
     target_request_record = None
     
-    with sessions_lock:
-        for sim_id, session in sessions.items():
-            crs = session.get("change_requests", {})
-            if request_id in crs:
-                target_sim_id = sim_id
-                target_request_record = crs[request_id]
-                session_ref = session
-                break
+    for sim_id, session, _ in workflow_store.list_sessions():
+        crs = session.get("change_requests", {})
+        if request_id in crs:
+            target_sim_id = sim_id
+            target_request_record = crs[request_id]
+            session_ref = session
+            break
                 
     if not target_sim_id or not target_request_record:
         raise HTTPException(
@@ -797,11 +847,14 @@ def confirm_change_request_amendment(request_id: str, payload: ConfirmAmendmentR
     Idempotent on repeat invocations.
     """
     target_session = None
-    with sessions_lock:
-        for sim_id, session in sessions.items():
-            if request_id in session.get("change_requests", {}):
-                target_session = session
-                break
+    target_session_id = None
+    target_session_version = None
+    for sim_id, session, version in workflow_store.list_sessions():
+        if request_id in session.get("change_requests", {}):
+            target_session = session
+            target_session_id = sim_id
+            target_session_version = version
+            break
 
     if not target_session:
         raise HTTPException(status_code=404, detail=f"Change request ID '{request_id}' not found.")
@@ -814,6 +867,7 @@ def confirm_change_request_amendment(request_id: str, payload: ConfirmAmendmentR
             decision=payload.decision,
             rationale=payload.rationale or ""
         )
+        _save_session(target_session_id, target_session, target_session_version)
         return result
     except AmendmentNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -851,10 +905,7 @@ def reject_change_request_amendment(request_id: str, payload: ConfirmAmendmentRe
 )
 def get_simulation_change_requests_history(simulation_id: str):
     """Fetches full chronological array of change requests, drift evaluations, and amendment states."""
-    with sessions_lock:
-        if simulation_id not in sessions:
-            raise HTTPException(status_code=404, detail="Simulation session not found.")
-        session = sessions[simulation_id]
+    session, _ = _load_session(simulation_id)
         
     change_requests = session.get("change_requests", {})
     history = []
