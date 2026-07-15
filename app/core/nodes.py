@@ -3,6 +3,7 @@ from google.adk.workflow import node, Workflow, Edge, START, RetryConfig
 from google.adk.agents.context import Context
 from google.adk.workflow._errors import NodeInterruptedError
 from app.core.state import StormModel, Vector2D, IcebergModel, get_typed_state, update_typed_state
+from app.core.hitl.interruption import InterruptionReason, InterruptionPayload, ADKInterruptionError
 from app.core.simulation import (
     PRESET_STORMS,
     DEFAULT_ICEBERGS,
@@ -137,8 +138,11 @@ def path_simulator(ctx: Context) -> dict:
         reasons = []
         if deadlocks:
             reasons.append(f"Active logical deadlocks: {', '.join(f'{p[0]} & {p[1]}' for p in deadlocks)}.")
+            interruption_reason = InterruptionReason.STATIC_CONSTRAINT_DEADLOCK
         if collision_names:
             reasons.append(f"Imminent collision threat with: {', '.join(collision_names)}.")
+            if not deadlocks:
+                interruption_reason = InterruptionReason.COLLISION_THREAT
 
         hitl_reason = " ".join(reasons)
         hitl_snapshot = {
@@ -151,25 +155,39 @@ def path_simulator(ctx: Context) -> dict:
             "deadlocks": deadlocks,
             "threats": collision_names,
         }
+
+        invocation_id = getattr(ctx, "invocation_id", "") or "inv-unknown"
+        simulation_id = state.simulation_id or "sim-unknown"
+        contract_id = state.active_contract_id or f"contract-{simulation_id}"
+        contract_version = state.active_contract_version or 1
+
+        payload = InterruptionPayload(
+            simulation_id=simulation_id,
+            invocation_id=invocation_id,
+            workflow_node="path_simulator",
+            reason=interruption_reason,
+            severity="CRITICAL" if deadlocks else "HIGH",
+            explanation=hitl_reason,
+            safe_telemetry_snapshot=hitl_snapshot,
+            goal_contract_id=contract_id,
+            active_contract_version=contract_version,
+            required_resolution_action="Resolve deadlock or trajectory collision threat to resume simulation."
+        )
+
         delta_update.update({
             "hitl_interrupted": True,
             "hitl_reason": hitl_reason,
             "hitl_telemetry_snapshot": hitl_snapshot,
+            "interruption_payload": payload.model_dump(),
         })
         
         # Enforce validation and state transition rules on node exit
         update_typed_state(ctx.state, delta_update, validate_transition=True)
         
-        return {
-            "current_position": new_pos,
-            "resultant_vector": resultant_v,
-            "actual_burn_rate": actual_burn,
-            "angular_drift_delta": angular_drift_delta,
-            "drift_warning": drift_warning,
-            "deadlocks": deadlocks,
-            "collision_threats": collision_names,
-            "status": "PAUSED_BY_GUARDRAIL",
-        }
+        # Register interruption ID on context for ADK tracking
+        ctx._interrupt_ids.add(payload.interruption_id)
+
+        raise ADKInterruptionError(payload)
 
     delta_update.update({
         "hitl_interrupted": False,

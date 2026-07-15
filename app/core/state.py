@@ -103,6 +103,7 @@ class SimulationStateSchema(BaseModel):
     hitl_interrupted: bool = Field(default=False, description="True if simulator loop is paused")
     hitl_reason: str = Field(default="", description="Human-in-the-loop pause reason")
     hitl_telemetry_snapshot: Optional[Dict[str, Any]] = Field(default=None, description="Diagnostic snapshot of state at interruption")
+    interruption_payload: Optional[Dict[str, Any]] = Field(default=None, description="Typed interruption payload dictionary")
     
     # Workflow node and execution metadata
     node_metadata: NodeMetadataModel = Field(

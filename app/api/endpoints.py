@@ -20,8 +20,11 @@ from app.core.goal_contract_service import (
     goal_contract_repo,
     ContractNotFoundError,
     StaleVersionError,
-    VersionConflictError,
 )
+from app.core.hitl.paused_policy import enforce_paused_session_policy
+from app.core.hitl.resume_service import resume_service, ResumeRequestPayload
+from app.core.hitl.checkpoint_service import checkpoint_service
+from app.core.hitl.interruption import InterruptionPayload, InterruptionReason
 
 router = APIRouter()
 
@@ -125,8 +128,26 @@ class EvaluateDecisionRequest(BaseModel):
     custom_opposing_pairs: Optional[List[Tuple[str, str]]] = Field(None, description="Optional custom opposing constraint pairs to evaluate")
 
 class ResumeSimulationRequest(BaseModel):
-    intent_vector: Vector2DModel = Field(..., description="The new intent vector to override the paused state")
-    declared_constraints: List[str] = Field(default_factory=list, description="New list of declared constraints")
+    checkpoint_id: str = Field(..., description="Target active checkpoint ID to resume from")
+    resume_request_id: str = Field(..., description="Unique request ID / idempotency key")
+    actor_id: str = Field(..., description="Actor/User ID attempting the resume")
+    resolution_action: str = Field(..., description="Resolution action description")
+    approval_decision_id: Optional[str] = Field(default=None, description="Optional approval or amendment decision ID")
+    amendment_id: Optional[str] = Field(default=None, description="Optional amendment ID")
+    expected_checkpoint_version: int = Field(..., ge=1, description="Expected checkpoint version number for optimistic locking")
+    intent_vector: Optional[Vector2DModel] = Field(None, description="Optional intent vector override")
+    declared_constraints: Optional[List[str]] = Field(None, description="Optional updated declared constraints")
+
+class ResumeSimulationResponse(BaseModel):
+    simulation_id: str = Field(..., description="The simulation session ID")
+    checkpoint_id: str = Field(..., description="The checkpoint ID resolved/resumed")
+    resumed_invocation_id: str = Field(..., description="The ADK workflow invocation ID resumed")
+    resume_status: str = Field(..., description="Resume status (RUNNING, PAUSED_BY_GUARDRAIL)")
+    current_workflow_state: Dict[str, Any] = Field(..., description="Full workflow state after resume execution")
+    telemetry: TelemetryModel = Field(..., description="Updated telemetry details")
+    active_contract_version: int = Field(..., description="Active Goal Contract version number")
+    remaining_interruption_details: Optional[Dict[str, Any]] = Field(None, description="Details if workflow encountered another blocking condition")
+    correlation_id: str = Field(..., description="Correlation / trace ID for tracking")
 
 class TelemetryModel(BaseModel):
     current_position: Dict[str, float] = Field(..., description="New position coordinates (x, y)")
@@ -399,50 +420,9 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
     profile = session["profile"]
     budget_limit = profile.get("anchor_goal", {}).get("budget_limit_usd", float("inf"))
     
-    # Block and return paused state if currently interrupted
-    if session.get("hitl_interrupted"):
-        history = session.get("history", [])
-        last_snap = history[-1]["telemetry_snapshot"] if history else {
-            "current_position": session.get("current_position", {"x": 0.0, "y": 0.0}),
-            "intent_vector": payload.intent_vector.model_dump(),
-            "resultant_vector": {"magnitude": 0.0, "heading_degrees": 0.0},
-            "actual_burn_rate": 0.0,
-            "angular_drift_delta": 0.0
-        }
-        
-        hitl_data = HITLInterceptionData(
-            requires_intervention=True,
-            reason=session.get("hitl_reason", ""),
-            telemetry_snapshot=session.get("hitl_telemetry_snapshot")
-        )
-        
-        active_constraints = []
-        deadlocks = history[-1]["fracture_events"]["deadlocks"] if history else []
-        threats = history[-1]["fracture_events"]["collision_threats"] if history else []
-        if deadlocks:
-            active_constraints.append("ENGINE_STALL")
-        if session.get("accumulated_burn", 0.0) > budget_limit:
-            active_constraints.append("BUDGET_OVERRUN")
-            
-        return EvaluateDecisionResponse(
-            simulation_id=sim_id,
-            telemetry=TelemetryModel(
-                current_position=session.get("current_position", {"x": 0.0, "y": 0.0}),
-                intent_vector=payload.intent_vector,
-                resultant_vector=Vector2DModel(
-                    magnitude=last_snap["resultant_vector"]["magnitude"],
-                    heading_degrees=last_snap["resultant_vector"]["heading_degrees"]
-                ),
-                actual_burn_rate=last_snap["actual_burn_rate"],
-                angular_drift_delta=last_snap["angular_drift_delta"]
-            ),
-            drift_warning=last_snap["angular_drift_delta"] > 15.0,
-            deadlocks=deadlocks,
-            collision_threats=threats,
-            hitl_interception_data=hitl_data,
-            status="PAUSED_BY_GUARDRAIL",
-            active_constraints=active_constraints
-        )
+    # Enforce authoritative paused session policy (raises HTTP 409 SIMULATION_PAUSED)
+    enforce_paused_session_policy(sim_id, session)
+
 
     # 1. Retrieve or create the ADK Session
     adk_session = runner.session_service.get_session_sync(
@@ -518,14 +498,63 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
         
     # 6. Update local session store and history
     with sessions_lock:
-        session["current_position"] = state.current_position
-        session["accumulated_burn"] = state.accumulated_burn
-        session["hitl_interrupted"] = state.hitl_interrupted
-        session["hitl_reason"] = state.hitl_reason
-        session["hitl_telemetry_snapshot"] = state.hitl_telemetry_snapshot
         if state.hitl_interrupted:
+            # HITL-004: Do NOT mutate position/burn when paused. Preserve pre-interruption values.
+            # Only update HITL tracking state in the session.
+            session["hitl_interrupted"] = True
+            session["hitl_reason"] = state.hitl_reason
+            session["hitl_telemetry_snapshot"] = state.hitl_telemetry_snapshot
             session["paused_invocation_id"] = invocation_id
-            
+
+            # HITL-002: Atomically create durable checkpoint on interruption
+            int_payload_dict = state.interruption_payload or {}
+            int_reason_str = int_payload_dict.get("reason", InterruptionReason.UNKNOWN.value)
+            try:
+                int_reason = InterruptionReason(int_reason_str)
+            except ValueError:
+                int_reason = InterruptionReason.UNKNOWN
+
+            interruption_payload = InterruptionPayload(
+                interruption_id=int_payload_dict.get("interruption_id", f"int-{uuid.uuid4()}"),
+                simulation_id=sim_id,
+                invocation_id=invocation_id,
+                workflow_node=int_payload_dict.get("workflow_node", "path_simulator"),
+                reason=int_reason,
+                severity=int_payload_dict.get("severity", "HIGH"),
+                explanation=state.hitl_reason,
+                safe_telemetry_snapshot=state.hitl_telemetry_snapshot or {},
+                goal_contract_id=session.get("active_contract_id"),
+                active_contract_version=session.get("active_contract_version"),
+                required_resolution_action=int_payload_dict.get(
+                    "required_resolution_action",
+                    "Resolve blocking condition before resuming."
+                ),
+            )
+
+            try:
+                chk = checkpoint_service.create_checkpoint(
+                    simulation_id=sim_id,
+                    invocation_id=invocation_id,
+                    node_position=int_payload_dict.get("workflow_node", "path_simulator"),
+                    state_dict=dict(adk_session.state),
+                    interruption_payload=interruption_payload,
+                    active_contract_id=session.get("active_contract_id"),
+                    active_contract_version=session.get("active_contract_version"),
+                )
+                session["active_checkpoint_id"] = chk.checkpoint_id
+                session["active_checkpoint_version"] = chk.checkpoint_version
+                session["paused_interruption_id"] = interruption_payload.interruption_id
+            except Exception:
+                # Checkpoint creation failure is non-fatal for the response
+                pass
+        else:
+            # Only update position/burn when workflow completed without interruption
+            session["current_position"] = state.current_position
+            session["accumulated_burn"] = state.accumulated_burn
+            session["hitl_interrupted"] = False
+            session["hitl_reason"] = ""
+            session["hitl_telemetry_snapshot"] = None
+
         history_list = session.setdefault("history", [])
         turn_number = len(history_list) + 1
         history_list.append({
@@ -574,7 +603,7 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
 
 @router.post(
     "/simulation/{simulation_id}/resume",
-    response_model=EvaluateDecisionResponse,
+    response_model=ResumeSimulationResponse,
     summary="Resume simulation from a paused state"
 )
 async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest):
@@ -582,129 +611,26 @@ async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest
         if simulation_id not in sessions:
             raise HTTPException(status_code=404, detail="Simulation session not found.")
         session = sessions[simulation_id]
-        
-    if not session.get("hitl_interrupted"):
-        raise HTTPException(status_code=400, detail="Simulation is not currently paused.")
-        
-    invocation_id = session.get("paused_invocation_id")
-    if not invocation_id:
-        raise HTTPException(status_code=500, detail="No active invocation ID found for resume.")
-        
-    # Fetch existing ADK session
-    adk_session = runner.session_service.get_session_sync(
-        app_name="polaris-neuroguard",
-        user_id=session["profile"]["user_id"],
-        session_id=simulation_id
-    )
-    if adk_session is None:
-        raise HTTPException(status_code=404, detail="ADK session not found.")
 
-    # Build and validate state delta to clear HITL flag and update decision
-    raw_delta = {
-        "intent_vector": payload.intent_vector.model_dump(),
-        "declared_constraints": payload.declared_constraints,
-        "hitl_interrupted": False,
-        "hitl_reason": "",
-        "hitl_telemetry_snapshot": None
-    }
-    validated_state = update_typed_state(adk_session.state, raw_delta, validate_transition=True)
-    state_delta = raw_delta
-    
-    # Run the workflow resuming from the invocation_id
-    events = []
-    async for event in runner.run_async(
-        user_id=session["profile"]["user_id"],
-        session_id=simulation_id,
-        invocation_id=invocation_id,
-        state_delta=state_delta
-    ):
-        events.append(event)
-        
-    # Fetch updated state
-    adk_session = runner.session_service.get_session_sync(
-        app_name="polaris-neuroguard",
-        user_id=session["profile"]["user_id"],
-        session_id=simulation_id
+    domain_payload = ResumeRequestPayload(
+        checkpoint_id=payload.checkpoint_id,
+        resume_request_id=payload.resume_request_id,
+        actor_id=payload.actor_id,
+        resolution_action=payload.resolution_action,
+        approval_decision_id=payload.approval_decision_id,
+        amendment_id=payload.amendment_id,
+        expected_checkpoint_version=payload.expected_checkpoint_version,
+        intent_vector=payload.intent_vector.model_dump() if payload.intent_vector else None,
+        declared_constraints=payload.declared_constraints,
     )
-    state = get_typed_state(adk_session.state)
-    
-    # Update local session
-    profile = session["profile"]
-    budget_limit = profile.get("anchor_goal", {}).get("budget_limit_usd", float("inf"))
-    projected_burn = state.accumulated_burn
-    
-    active_constraints = []
-    if state.active_deadlocks:
-        active_constraints.append("ENGINE_STALL")
-    if projected_burn > budget_limit:
-        active_constraints.append("BUDGET_OVERRUN")
-        
-    status = "PAUSED_BY_GUARDRAIL" if state.hitl_interrupted else "RUNNING"
-    
-    hitl_data = None
-    if state.hitl_interrupted:
-        hitl_data = HITLInterceptionData(
-            requires_intervention=True,
-            reason=state.hitl_reason,
-            telemetry_snapshot=state.hitl_telemetry_snapshot
-        )
-        
-    with sessions_lock:
-        session["current_position"] = state.current_position
-        session["accumulated_burn"] = projected_burn
-        session["hitl_interrupted"] = state.hitl_interrupted
-        session["hitl_reason"] = state.hitl_reason
-        session["hitl_telemetry_snapshot"] = state.hitl_telemetry_snapshot
-        if state.hitl_interrupted:
-            session["paused_invocation_id"] = invocation_id
-        else:
-            session.pop("paused_invocation_id", None)
-            
-        history_list = session.setdefault("history", [])
-        turn_number = len(history_list) + 1
-        history_list.append({
-            "turn_number": turn_number,
-            "telemetry_snapshot": {
-                "current_position": state.current_position,
-                "intent_vector": payload.intent_vector.model_dump(),
-                "resultant_vector": {
-                    "magnitude": state.resultant_vector.magnitude,
-                    "heading_degrees": state.resultant_vector.heading_degrees
-                },
-                "actual_burn_rate": state.actual_burn_rate,
-                "angular_drift_delta": state.angular_drift_delta
-            },
-            "active_storms": state.active_storms,
-            "applied_decision": {
-                "intent_vector": payload.intent_vector.model_dump(),
-                "declared_constraints": payload.declared_constraints
-            },
-            "fracture_events": {
-                "deadlocks": state.active_deadlocks,
-                "collision_threats": state.collision_threats,
-                "active_constraints": active_constraints
-            }
-        })
-        
-    return EvaluateDecisionResponse(
+
+    return await resume_service.execute_resume(
         simulation_id=simulation_id,
-        telemetry=TelemetryModel(
-            current_position=state.current_position,
-            intent_vector=payload.intent_vector,
-            resultant_vector=Vector2DModel(
-                magnitude=state.resultant_vector.magnitude,
-                heading_degrees=state.resultant_vector.heading_degrees
-            ),
-            actual_burn_rate=state.actual_burn_rate,
-            angular_drift_delta=state.angular_drift_delta
-        ),
-        drift_warning=state.drift_warning,
-        deadlocks=state.active_deadlocks,
-        collision_threats=state.collision_threats,
-        hitl_interception_data=hitl_data,
-        status=status,
-        active_constraints=active_constraints
+        payload=domain_payload,
+        sim_session=session,
+        runner=runner
     )
+
 
 
 @router.get(
