@@ -25,6 +25,8 @@ from app.core.drift_models import (
 from app.core.drift_extraction import extract_structured_changes
 from app.core.drift_engine import evaluate_request_drift
 from app.core.semantic_drift import SemanticScorerInterface
+from app.core.hitl.checkpoint_service import checkpoint_service
+from app.core.hitl.interruption import InterruptionPayload, InterruptionReason
 
 
 class AmendmentWorkflowError(ValueError):
@@ -99,7 +101,7 @@ class GoalAmendmentWorkflowService:
             semantic_scorer=semantic_scorer
         )
 
-        # Initial status determination
+        # Initial status determination and checkpoint integration
         if action == DriftDecisionAction.ALLOW:
             status = AmendmentStatus.NO_AMENDMENT_NEEDED
         elif action == DriftDecisionAction.NEEDS_CLARIFICATION:
@@ -110,6 +112,54 @@ class GoalAmendmentWorkflowService:
             status = AmendmentStatus.PENDING_HITL_REVIEW
         else:
             status = AmendmentStatus.PENDING_CONFIRMATION
+
+        # If action requires confirmation or HITL review, create/update paused checkpoint
+        if action in [DriftDecisionAction.REQUIRE_CONFIRMATION, DriftDecisionAction.REQUIRE_HITL_REVIEW]:
+            sim_id = sim_session.get("profile", {}).get("simulation_id", "") or sim_session.get("simulation_id", "")
+            if not sim_id and "history" in sim_session:
+                sim_id = sim_session.get("simulation_id", "")
+
+            if sim_id:
+                reason = (
+                    InterruptionReason.DRIFT_REQUIRES_HITL_REVIEW
+                    if action == DriftDecisionAction.REQUIRE_HITL_REVIEW
+                    else InterruptionReason.DRIFT_REQUIRES_CONFIRMATION
+                )
+                payload = InterruptionPayload(
+                    simulation_id=sim_id,
+                    invocation_id=sim_session.get("paused_invocation_id", "inv-drift-pause"),
+                    workflow_node="drift_assessment",
+                    reason=reason,
+                    severity="HIGH" if action == DriftDecisionAction.REQUIRE_HITL_REVIEW else "MEDIUM",
+                    explanation=explanation,
+                    safe_telemetry_snapshot={"change_request_id": request_id, "classification": classification.value},
+                    goal_contract_id=contract_id,
+                    active_contract_version=active_contract.contract_version,
+                    change_request_id=request_id,
+                    required_resolution_action="Review and explicitly approve or reject goal contract amendment."
+                )
+                state_dict = {
+                    "simulation_id": sim_id,
+                    "user_id": sim_session.get("profile", {}).get("user_id", ""),
+                    "current_position": sim_session.get("current_position", {"x": 0.0, "y": 0.0}),
+                    "accumulated_burn": sim_session.get("accumulated_burn", 0.0),
+                    "hitl_interrupted": True,
+                    "hitl_reason": explanation,
+                    "hitl_telemetry_snapshot": payload.safe_telemetry_snapshot
+                }
+                chk = checkpoint_service.create_checkpoint(
+                    simulation_id=sim_id,
+                    invocation_id=payload.invocation_id,
+                    node_position="drift_assessment",
+                    state_dict=state_dict,
+                    interruption_payload=payload,
+                    active_contract_id=contract_id,
+                    active_contract_version=active_contract.contract_version,
+                    change_request_id=request_id
+                )
+                sim_session["hitl_interrupted"] = True
+                sim_session["hitl_reason"] = explanation
+                sim_session["active_checkpoint_id"] = chk.checkpoint_id
 
         evaluation_data = {
             "request_id": request_id,
@@ -134,6 +184,7 @@ class GoalAmendmentWorkflowService:
             self._evaluations[request_id] = evaluation_data
 
         return evaluation_data.copy()
+
 
     def get_evaluation(self, request_id: str) -> Dict[str, Any]:
         """Retrieves prior drift evaluation record for a request ID."""
