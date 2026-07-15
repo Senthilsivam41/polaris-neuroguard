@@ -150,7 +150,9 @@ class TestPausedSessionBehavior(unittest.TestCase):
         sim_id = reg_resp.json()["simulation_id"]
 
         async def mock_generate_no_deadlock(self_inner, llm_request, stream=False):
-            text = '{"has_deadlock": false, "conflicts": []}'
+            text = '{"is_consistent": true, "evidence": "Mock consistent", "confidence": 1.0}'
+            if "conflict" in str(llm_request).lower() or "deadlock" in str(llm_request).lower():
+                text = '{"has_deadlock": false, "conflicts": []}'
             yield LlmResponse(content=Content(role="model", parts=[Part(text=text)]))
 
         with patch("google.adk.models.google_llm.Gemini.generate_content_async", new=mock_generate_no_deadlock):
