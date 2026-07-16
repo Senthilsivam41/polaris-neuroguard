@@ -4,9 +4,9 @@
 
 Polaris Neuro Guard is a strategic simulation platform built with Python and FastAPI. It models an enterprise initiative ("The Ship") steering toward a strategic objective ("The Mountain") through systemic constraints ("The Icebergs"). The platform calculates and prevents strategic drift under macro-environmental volatility using vector mechanics and deadlock detection.
 
-## 🎉 Milestone Achieved: Phases 1 to 5 Complete
+## 🎉 Milestone Achieved: Phases 1 to 6 Complete
 
-Polaris Neuro Guard has achieved a major development milestone with the complete implementation, integration, and test verification of **Phases 1 through 5**:
+Polaris Neuro Guard has achieved a major development milestone with the complete implementation, integration, and test verification of **Phases 1 through 6**:
 
 1. **Phase 1: Core Simulation Mechanics**
    - 2D vector physics engine calculating steering intent vs. resultant trajectory.
@@ -36,6 +36,12 @@ Polaris Neuro Guard has achieved a major development milestone with the complete
    - Atomic transactions with `BEGIN IMMEDIATE` serialize competing writes.
    - Optimistic concurrency control using autoincrementing version checks.
    - Scoped request idempotency for state mutation operations.
+
+6. **Phase 6: API & Security Hardening**
+   - Strict API/domain validation for vectors, icebergs, constraint and storm limits, plus explicit rejection of unknown storms.
+   - Bearer-token authentication with simulation ownership enforcement and reviewer/override role support.
+   - Authenticated A2A node apps, configured CORS origins, request-size limits, rate limiting, and request timeouts.
+   - Append-only, hash-chained audit records with sensitive-field redaction for registrations, decisions, drift/amendment actions, storm injections, and HITL resumes.
 
 ## 🔄 Idempotency & Retry Policy
 
@@ -78,10 +84,27 @@ pip install -r requirements.txt
 ```
 
 ### 3. Run the Server
+
+Configure a production API token and allowed frontend origins before starting the service. `POLARIS_API_TOKENS` maps each bearer token to its actor and roles:
+
+```bash
+export POLARIS_API_TOKENS='{"replace-with-a-secret-token":{"actor_id":"user_123","roles":["operator"]}}'
+export ALLOWED_ORIGINS='https://app.example.com'
+```
+
 ```bash
 uvicorn app.main:app --reload
 ```
 The server will start at `http://127.0.0.1:8000`. You can verify the setup by visiting `http://127.0.0.1:8000/health`.
+
+Protected `/api/v1` and A2A operations require `Authorization: Bearer <token>`. For local offline/mock development only, set `OFFLINE_MODE=true` or `MOCK_MODE=true`; the development token is `dev-local-token`.
+
+### Security Controls
+
+- `AUTH_REQUIRED` (default `true`) requires bearer-token authentication.
+- `POLARIS_API_TOKENS` is a JSON object of tokens and principals; roles may include `operator`, `reviewer`, `override`, or `admin`.
+- `ALLOWED_ORIGINS`, `RATE_LIMIT_PER_MINUTE`, `MAX_REQUEST_BYTES`, and `REQUEST_TIMEOUT_SECONDS` configure browser access and abuse protections.
+- Security/audit failures use structured error codes; audit records are durable, append-only, hash chained, and redact token- and secret-like fields.
 
 ### 📖 API Interactive Documentation
 
