@@ -3,7 +3,7 @@ import threading
 import asyncio
 from enum import Enum
 from typing import Dict, Any, List, Tuple, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from app.core.simulation import execute_turn, Vector2D, EnvironmentStorm, PRESET_STORMS, Iceberg
 from app.core.config import BASE_BURN_RATE
@@ -30,6 +30,7 @@ from app.core.persistence import (
     VersionConflictError,
     IdempotencyConflictError,
 )
+from app.core.security import Principal, audit_event, current_principal, enforce_owner
 
 router = APIRouter()
 
@@ -103,14 +104,14 @@ class UserProfile(BaseModel):
 
 # 2. Schemas for Decision Evaluation
 class Vector2DModel(BaseModel):
-    magnitude: float = Field(..., description="Speed or magnitude of the vector", examples=[10.0])
-    heading_degrees: float = Field(..., description="Direction in degrees from positive Y-axis (0-360°)", examples=[0.0])
+    magnitude: float = Field(..., ge=0.0, le=100000.0, description="Speed or magnitude of the vector", examples=[10.0])
+    heading_degrees: float = Field(..., ge=0.0, lt=360.0, description="Direction in degrees from positive Y-axis (0-360°)", examples=[0.0])
 
 class IcebergModel(BaseModel):
     name: str = Field(..., description="The name of the iceberg constraint", examples=["Custom Budget Freeze"])
     x: float = Field(..., description="X coordinate of the iceberg center", examples=[-100.0])
     y: float = Field(..., description="Y coordinate of the iceberg center", examples=[400.0])
-    radius: float = Field(100.0, description="The safety boundary radius around the iceberg", examples=[100.0])
+    radius: float = Field(100.0, gt=0.0, le=100000.0, description="The safety boundary radius around the iceberg", examples=[100.0])
 
 class EvaluateDecisionRequest(BaseModel):
     simulation_id: str = Field(
@@ -121,15 +122,17 @@ class EvaluateDecisionRequest(BaseModel):
     intent_vector: Vector2DModel = Field(..., description="The User's intentional velocity and direction")
     declared_constraints: List[str] = Field(
         default_factory=list, 
+        max_length=50,
         description="Active constraints declared by the user",
         examples=[["RIGID_TIMELINE", "FREEZE_HEADCOUNT"]]
     )
     active_storms: List[str] = Field(
         default_factory=list, 
+        max_length=20,
         description="Names of active environmental storms (e.g. 'Category 4 Cyclone')",
         examples=[["Category 4 Cyclone"]]
     )
-    custom_icebergs: Optional[List[IcebergModel]] = Field(None, description="Optional custom icebergs to inject")
+    custom_icebergs: Optional[List[IcebergModel]] = Field(None, max_length=20, description="Optional custom icebergs to inject")
     custom_opposing_pairs: Optional[List[Tuple[str, str]]] = Field(None, description="Optional custom opposing constraint pairs to evaluate")
     request_id: Optional[str] = Field(None, description="Optional idempotency key for this evaluation")
 
@@ -296,10 +299,12 @@ def get_status():
     response_model=RegisterSimulationResponse, 
     summary="Register new user profile and initialize simulation"
 )
-def register_simulation(profile: UserProfile):
+def register_simulation(profile: UserProfile, principal: Principal = Depends(current_principal)):
     """Registers a user profile containing role, scale, industry, anchor goals, and risk tolerance.
     Initializes simulation coordinates at (0,0) with destination targets set and baseline GoalContract (v1).
     """
+    if principal.actor_id != profile.user_id and not principal.roles.intersection({"admin", "override"}):
+        raise HTTPException(status_code=403, detail={"error_code": "PROFILE_OWNERSHIP_REQUIRED"})
     sim_id = str(uuid.uuid4())
     contract_id = f"contract-{sim_id}"
     
@@ -341,6 +346,8 @@ def register_simulation(profile: UserProfile):
     workflow_store.create_session(sim_id, session_data)
     with sessions_lock:
         sessions[sim_id] = session_data
+    audit_event("simulation_registered", actor_id=principal.actor_id, simulation_id=sim_id,
+                details={"goal_hash": saved_contract.content_fingerprint, "contract_version": 1})
         
     return {
         "simulation_id": sim_id,
@@ -356,7 +363,7 @@ def register_simulation(profile: UserProfile):
     response_model=ChangeRequestResponse,
     summary="Submit a natural-language change request for goal drift analysis (DRIFT-003)"
 )
-def submit_change_request(payload: ChangeRequestPayload):
+def submit_change_request(payload: ChangeRequestPayload, principal: Principal = Depends(current_principal)):
     """Submits a natural-language change request referencing the expected active goal-contract version.
     Verifies actor ownership and contract version alignment. Stores the request without mutating the active Goal Contract.
     """
@@ -366,6 +373,7 @@ def submit_change_request(payload: ChangeRequestPayload):
         
     profile = session.get("profile", {})
     owner_id = profile.get("user_id", "")
+    enforce_owner(principal, owner_id)
     
     # Ownership authorization check
     if payload.actor_id and owner_id and payload.actor_id != owner_id:
@@ -430,6 +438,8 @@ def submit_change_request(payload: ChangeRequestPayload):
         "response": response_data
     }
     _save_session(sim_id, session, session_version)
+    audit_event("change_request_submitted", actor_id=principal.actor_id, request_id=payload.request_id,
+                simulation_id=sim_id, details={"contract_version": active_contract.contract_version})
 
     return response_data
 
@@ -439,7 +449,7 @@ def submit_change_request(payload: ChangeRequestPayload):
     response_model=EvaluateDecisionResponse,
     summary="Evaluate decision step telemetry, deadlocks, and path collisions"
 )
-async def evaluate_decision(payload: EvaluateDecisionRequest):
+async def evaluate_decision(payload: EvaluateDecisionRequest, principal: Principal = Depends(current_principal)):
     """Executes a single simulation step based on the user's steering intent, active constraints, and storms.
     
     Runs real-time logical deadlock checking and capsule path collision projection. Returns full telemetry
@@ -460,6 +470,11 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
     session, session_version = _load_session(sim_id)
         
     profile = session["profile"]
+    enforce_owner(principal, profile["user_id"])
+    known_storms = set(PRESET_STORMS).union(session.get("custom_storms", {}))
+    unknown_storms = sorted(set(payload.active_storms).difference(known_storms))
+    if unknown_storms:
+        raise HTTPException(status_code=422, detail={"error_code": "UNKNOWN_STORM", "storms": unknown_storms})
     budget_limit = profile.get("anchor_goal", {}).get("budget_limit_usd", float("inf"))
     
     # Enforce authoritative paused session policy (raises HTTP 409 SIMULATION_PAUSED)
@@ -643,6 +658,8 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
         active_constraints=active_constraints
     )
     workflow_store.complete_idempotency("evaluate", sim_id, request_id, response.model_dump())
+    audit_event("decision_evaluated", actor_id=principal.actor_id, request_id=request_id, simulation_id=sim_id,
+                details={"status": status, "deadlocks": state.active_deadlocks, "model": "configured"})
     return response
 
 @router.post(
@@ -650,7 +667,7 @@ async def evaluate_decision(payload: EvaluateDecisionRequest):
     response_model=ResumeSimulationResponse,
     summary="Resume simulation from a paused state"
 )
-async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest):
+async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest, principal: Principal = Depends(current_principal)):
     idempotency_payload = payload.model_dump(exclude={"resume_request_id"})
     try:
         replay = workflow_store.reserve_idempotency(
@@ -664,6 +681,7 @@ async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest
         return ResumeSimulationResponse.model_validate(replay)
 
     session, session_version = _load_session(simulation_id)
+    enforce_owner(principal, session["profile"]["user_id"])
 
     domain_payload = ResumeRequestPayload(
         checkpoint_id=payload.checkpoint_id,
@@ -685,6 +703,8 @@ async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest
     )
     _save_session(simulation_id, session, session_version)
     workflow_store.complete_idempotency("resume", simulation_id, payload.resume_request_id, response)
+    audit_event("simulation_resumed", actor_id=principal.actor_id, request_id=payload.resume_request_id,
+                simulation_id=simulation_id, details={"checkpoint_id": payload.checkpoint_id, "status": response["resume_status"]})
     return response
 
 
@@ -711,11 +731,12 @@ def get_simulation_history(simulation_id: str):
     response_model=InjectStormResponse,
     summary="Dynamically inject or modify a custom environmental storm"
 )
-def inject_storm(simulation_id: str, payload: InjectStormRequest):
+def inject_storm(simulation_id: str, payload: InjectStormRequest, principal: Principal = Depends(current_principal)):
     """Injects a new custom environmental storm or updates an existing one for the session.
     Subsequent evaluation turns will process this storm vector if included in active_storms.
     """
     session, session_version = _load_session(simulation_id)
+    enforce_owner(principal, session["profile"]["user_id"])
 
     # Ensure custom_storms and active_storms dictionaries are initialized
     if "custom_storms" not in session:
@@ -735,6 +756,8 @@ def inject_storm(simulation_id: str, payload: InjectStormRequest):
     session["custom_storms"][payload.name] = storm_dict
     session["active_storms"][payload.name] = storm_dict
     _save_session(simulation_id, session, session_version)
+    audit_event("storm_injected", actor_id=principal.actor_id, simulation_id=simulation_id,
+                details={"storm_name": payload.name, "storm_type": payload.storm_type})
         
     return {
         "status": "success",
@@ -774,7 +797,8 @@ class ConfirmAmendmentResponse(BaseModel):
     "/simulation/change-requests/{request_id}/evaluate",
     summary="Evaluate structured drift, rules, and semantic score for a submitted change request (DRIFT-009)"
 )
-def evaluate_change_request_drift(request_id: str, payload: Optional[EvaluateDriftRequest] = None):
+def evaluate_change_request_drift(request_id: str, payload: Optional[EvaluateDriftRequest] = None,
+                                  principal: Principal = Depends(current_principal)):
     """Evaluates request-intent drift for a previously submitted change request.
     Returns comprehensive deterministic rule findings, semantic score, risk policy profile, and recommended action.
     Does NOT mutate the active Goal Contract.
@@ -801,6 +825,7 @@ def evaluate_change_request_drift(request_id: str, payload: Optional[EvaluateDri
 
     # Actor authorization check
     owner_id = session_ref.get("profile", {}).get("user_id", "")
+    enforce_owner(principal, owner_id)
     if actor_id and owner_id and actor_id != owner_id:
         raise HTTPException(
             status_code=403,
@@ -809,6 +834,8 @@ def evaluate_change_request_drift(request_id: str, payload: Optional[EvaluateDri
 
     try:
         result = amendment_workflow_service.evaluate_change_request(session_ref, target_request_record)
+        audit_event("drift_evaluated", actor_id=principal.actor_id, request_id=request_id,
+                    simulation_id=target_sim_id, details={"drift_evidence": result})
         return result
     except StaleVersionError as e:
         raise HTTPException(
@@ -840,7 +867,8 @@ def get_change_request_evaluation(request_id: str):
     response_model=ConfirmAmendmentResponse,
     summary="Explicitly confirm or approve/reject a evaluated goal-amendment request (DRIFT-010)"
 )
-def confirm_change_request_amendment(request_id: str, payload: ConfirmAmendmentRequest):
+def confirm_change_request_amendment(request_id: str, payload: ConfirmAmendmentRequest,
+                                    principal: Principal = Depends(current_principal)):
     """Processes explicit user or reviewer confirmation/rejection of a change request.
     If APPROVED: Instantiates new GoalContract version N+1.
     If REJECTED: Marks amendment status REJECTED without mutating the Goal Contract.
@@ -858,6 +886,7 @@ def confirm_change_request_amendment(request_id: str, payload: ConfirmAmendmentR
 
     if not target_session:
         raise HTTPException(status_code=404, detail=f"Change request ID '{request_id}' not found.")
+    enforce_owner(principal, target_session.get("profile", {}).get("user_id", ""))
 
     try:
         result = amendment_workflow_service.confirm_change_request(
@@ -868,6 +897,8 @@ def confirm_change_request_amendment(request_id: str, payload: ConfirmAmendmentR
             rationale=payload.rationale or ""
         )
         _save_session(target_session_id, target_session, target_session_version)
+        audit_event("amendment_decision", actor_id=principal.actor_id, request_id=request_id,
+                    simulation_id=target_session_id, details={"decision": payload.decision, "result": result})
         return result
     except AmendmentNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -893,10 +924,11 @@ def confirm_change_request_amendment(request_id: str, payload: ConfirmAmendmentR
     response_model=ConfirmAmendmentResponse,
     summary="Convenience endpoint to explicitly reject a goal-amendment request (DRIFT-010)"
 )
-def reject_change_request_amendment(request_id: str, payload: ConfirmAmendmentRequest):
+def reject_change_request_amendment(request_id: str, payload: ConfirmAmendmentRequest,
+                                    principal: Principal = Depends(current_principal)):
     """Rejects a change request amendment without mutating active Goal Contract."""
     payload.decision = "REJECT"
-    return confirm_change_request_amendment(request_id, payload)
+    return confirm_change_request_amendment(request_id, payload, principal)
 
 
 @router.get(

@@ -1,4 +1,5 @@
 import os
+import json
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file if it exists
@@ -29,6 +30,25 @@ ADK_RETRY_INITIAL_DELAY: float = float(os.getenv("ADK_RETRY_INITIAL_DELAY", "2.0
 ADK_RETRY_MAX_DELAY: float = float(os.getenv("ADK_RETRY_MAX_DELAY", "10.0"))
 ADK_RETRY_BACKOFF_FACTOR: float = float(os.getenv("ADK_RETRY_BACKOFF_FACTOR", "2.0"))
 
+# Phase 6 API hardening.  Production deployments must explicitly configure
+# tokens; the development token is available only in offline/mock mode.
+AUTH_REQUIRED: bool = os.getenv("AUTH_REQUIRED", "true").lower() == "true"
+API_TOKENS_JSON: str = os.getenv("POLARIS_API_TOKENS", "{}")
+ALLOWED_ORIGINS: list[str] = [origin.strip() for origin in os.getenv(
+    "ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+).split(",") if origin.strip()]
+RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
+MAX_REQUEST_BYTES: int = int(os.getenv("MAX_REQUEST_BYTES", "65536"))
+REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
+
+try:
+    API_TOKENS: dict[str, dict] = json.loads(API_TOKENS_JSON)
+except json.JSONDecodeError as exc:
+    raise ValueError("POLARIS_API_TOKENS must be a JSON object keyed by token.") from exc
+
+if (OFFLINE_MODE or MOCK_MODE) and not API_TOKENS:
+    API_TOKENS = {"dev-local-token": {"actor_id": "dev-user", "roles": ["operator", "reviewer", "override"]}}
+
 def validate_config():
     if BASE_BURN_RATE < 0.0:
         raise ValueError("BASE_BURN_RATE must be non-negative.")
@@ -48,6 +68,8 @@ def validate_config():
         raise ValueError("ADK_RETRY_MAX_DELAY must be greater than or equal to ADK_RETRY_INITIAL_DELAY.")
     if ADK_RETRY_BACKOFF_FACTOR < 1.0:
         raise ValueError("ADK_RETRY_BACKOFF_FACTOR must be greater than or equal to 1.0.")
+    if RATE_LIMIT_PER_MINUTE <= 0 or MAX_REQUEST_BYTES <= 0 or REQUEST_TIMEOUT_SECONDS <= 0:
+        raise ValueError("Phase 6 rate, size, and timeout settings must be positive.")
     
     # Require GEMINI_API_KEY unless explicitly in offline/mock mode
     is_offline = OFFLINE_MODE or MOCK_MODE
@@ -57,6 +79,8 @@ def validate_config():
             "To bypass this check and run the application in offline mock mode, "
             "please set OFFLINE_MODE=true or MOCK_MODE=true in your environment or .env file."
         )
+    if AUTH_REQUIRED and not API_TOKENS and not is_offline:
+        raise ValueError("POLARIS_API_TOKENS must configure at least one API token when authentication is required.")
 
 # Run validation on startup import
 validate_config()
@@ -78,5 +102,4 @@ WORKFLOW_RETRY_CONFIG = RetryConfig(
     max_delay=ADK_RETRY_MAX_DELAY,
     backoff_factor=ADK_RETRY_BACKOFF_FACTOR,
 )
-
 
