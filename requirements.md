@@ -81,6 +81,14 @@ $$\sigma = |\theta_g - \theta_a|$$
   2. The API layer must expose a separate resume endpoint `POST /simulation/{simulation_id}/resume` that accepts a human decision payload and re-enters the graph at the paused node. `POST /simulation/evaluate-decision` must be blocked and return a paused state if invoked while the simulation is interrupted.
   3. The structured JSON payload returned at pause time must contain `reason` and `telemetry_snapshot` diagnostic states.
 
+### 2.6 API Security, Authorization & Auditability
+* **FR-6.1:** Protected API and A2A operations must require bearer-token authentication. Production deployments must configure tokens through `POLARIS_API_TOKENS`; offline/mock mode may provide an explicitly documented development token.
+* **FR-6.2:** The system must enforce simulation ownership for state reads and mutations. A caller may access only simulations owned by its authenticated actor unless it has an authorized `reviewer`, `override`, or `admin` role.
+* **FR-6.3:** Domain/API validation must reject invalid vector headings and magnitudes, non-positive iceberg radii, excessive constraint/storm/iceberg counts, and unknown storm names. Validation failures must return structured client errors and must not mutate session state.
+* **FR-6.4:** Browser access must use configured CORS origins only. The API must enforce configurable request-size limits, per-client rate limits, and request execution timeouts; rate-limit and timeout failures must be observable through structured responses/logging.
+* **FR-6.5:** The system must record security-relevant and workflow actions in a durable append-only audit log, including baseline goal hashes, state-changing decisions, change/drift evidence, amendment decisions, storm injection, and HITL resumes. Audit entries must identify actor and request where available, redact sensitive fields, and be hash chained to make modification evident.
+* **FR-6.6:** A2A-exposed agent applications must apply the same authentication policy as the primary REST API.
+
 ---
 
 ## 3. Non-Functional Requirements
@@ -94,7 +102,12 @@ $$\sigma = |\theta_g - \theta_a|$$
 * **NFR-2.2:** The architecture must strictly honor YAGNI (You Ain't Gonna Need It) principles, eliminating bloated boilerplate code in favor of native Python libraries and FastAPI dependencies.
 
 ### 3.3 Data Management
-* **NFR-3.1:** Session tokens, telemetry tracking, and active constraint matrices must be managed via an isolated, lightweight, thread-safe in-memory data store to maximize processing speed.
+* **NFR-3.1:** Simulation sessions, telemetry tracking, active constraint matrices, idempotency records, and audit records must be managed by an isolated lightweight durable store. State updates must use atomic transactions and optimistic concurrency controls; in-memory structures may be used only as non-authoritative process-local caches.
+
+### 3.4 Security & Operational Resilience
+* **NFR-4.1:** Authentication must fail closed when enabled: missing, malformed, or unknown bearer tokens must not grant access.
+* **NFR-4.2:** Secrets, tokens, passwords, and API keys must not be emitted in audit records or application logs.
+* **NFR-4.3:** Security limits—including CORS origins, rate limit, maximum request size, and request timeout—must be configurable by environment without code changes.
 
 ---
 
