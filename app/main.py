@@ -5,12 +5,13 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import (PROJECT_NAME, VERSION, API_V1_STR, ALLOWED_ORIGINS,
-                             MAX_REQUEST_BYTES, RATE_LIMIT_PER_MINUTE, REQUEST_TIMEOUT_SECONDS)
+                             DEPLOYMENT_ENV, MAX_REQUEST_BYTES, RATE_LIMIT_PER_MINUTE, REQUEST_TIMEOUT_SECONDS)
 from app.api.endpoints import router as api_router
 from app.core.security import current_principal
+from app.core.observability import alerts, metrics, start_trace
 
 # ponytail: custom JSONFormatter subclassing standard logging.Formatter for JSON logging
 class JSONFormatter(logging.Formatter):
@@ -69,11 +70,19 @@ async def abuse_protection(request: Request, call_next):
     if len(window) >= RATE_LIMIT_PER_MINUTE:
         return JSONResponse(status_code=429, content={"detail": {"error_code": "RATE_LIMITED"}}, headers={"Retry-After": "60"})
     window.append(now)
+    trace_id = start_trace(request.headers.get("X-Trace-Id"))
+    started = time.monotonic()
     try:
-        return await asyncio.wait_for(call_next(request), timeout=REQUEST_TIMEOUT_SECONDS)
+        response = await asyncio.wait_for(call_next(request), timeout=REQUEST_TIMEOUT_SECONDS)
+        response.headers["X-Trace-Id"] = trace_id
+        metrics.increment("api_requests_total", {"environment": DEPLOYMENT_ENV, "path": request.url.path, "status": str(response.status_code)})
+        return response
     except asyncio.TimeoutError:
         logger.warning("Request timed out: %s", request.url.path)
+        metrics.increment("api_timeouts_total", {"environment": DEPLOYMENT_ENV, "path": request.url.path})
         return JSONResponse(status_code=504, content={"detail": {"error_code": "REQUEST_TIMEOUT"}})
+    finally:
+        metrics.observe("api_request", time.monotonic() - started, {"environment": DEPLOYMENT_ENV, "path": request.url.path})
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -86,5 +95,13 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    return PlainTextResponse(metrics.prometheus(), media_type="text/plain; version=0.0.4")
+
+@app.get("/api/v1/operations/alerts", dependencies=[Depends(current_principal)])
+def operational_alerts():
+    return {"alerts": [alert.__dict__ for alert in alerts.evaluate()]}
 
 app.include_router(api_router, prefix=API_V1_STR, dependencies=[Depends(current_principal)])

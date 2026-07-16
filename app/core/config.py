@@ -41,6 +41,9 @@ RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
 MAX_REQUEST_BYTES: int = int(os.getenv("MAX_REQUEST_BYTES", "65536"))
 REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
 
+# Phase 7 observability labels. Never use request IDs, actors, or prompts as metric labels.
+DEPLOYMENT_ENV: str = os.getenv("DEPLOYMENT_ENV", "development")
+
 try:
     API_TOKENS: dict[str, dict] = json.loads(API_TOKENS_JSON)
 except json.JSONDecodeError as exc:
@@ -102,4 +105,3 @@ WORKFLOW_RETRY_CONFIG = RetryConfig(
     max_delay=ADK_RETRY_MAX_DELAY,
     backoff_factor=ADK_RETRY_BACKOFF_FACTOR,
 )
-
