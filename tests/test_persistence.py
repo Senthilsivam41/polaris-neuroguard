@@ -38,3 +38,18 @@ class TestSQLiteWorkflowStore(unittest.TestCase):
         with self.assertRaises(IdempotencyConflictError):
             self.store.reserve_idempotency("evaluate", "sim-1", "req-1", {"value": 2})
 
+    def test_audit_records_are_append_only_and_hash_chained(self):
+        self.store.append_audit_record(
+            event_type="registered", actor_id="actor-1", request_id="req-1",
+            simulation_id="sim-1", details={"goal_hash": "abc"},
+        )
+        self.store.append_audit_record(
+            event_type="evaluated", actor_id="actor-1", request_id="req-2",
+            simulation_id="sim-1", details={"status": "RUNNING"},
+        )
+        import sqlite3
+        with sqlite3.connect(self.path) as conn:
+            rows = conn.execute("SELECT previous_hash, record_hash FROM audit_records ORDER BY sequence").fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertIsNone(rows[0][0])
+        self.assertEqual(rows[1][0], rows[0][1])

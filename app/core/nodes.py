@@ -235,9 +235,13 @@ def get_a2a_nodes() -> dict:
     'a2a' package is missing from the environment.
     """
     from google.adk.a2a.utils.agent_to_a2a import to_a2a as _to_a2a
-    return {
+    from app.core.security import A2AAuthMiddleware
+    nodes = {
         "goal_analyzer": _to_a2a(goal_analyzer),
         "constraint_predictor": _to_a2a(constraint_predictor),
         "weather_station": _to_a2a(weather_station),
         "path_simulator": _to_a2a(path_simulator),
     }
+    for app in nodes.values():
+        app.add_middleware(A2AAuthMiddleware)
+    return nodes

@@ -62,6 +62,19 @@ class SQLiteWorkflowStore:
                     PRIMARY KEY (operation, simulation_id, request_id)
                 )"""
             )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS audit_records (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_at TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    actor_id TEXT NOT NULL,
+                    request_id TEXT,
+                    simulation_id TEXT,
+                    details_json TEXT NOT NULL,
+                    previous_hash TEXT,
+                    record_hash TEXT NOT NULL UNIQUE
+                )"""
+            )
 
     @staticmethod
     def canonical_hash(payload: Dict[str, Any]) -> str:
@@ -158,6 +171,25 @@ class SQLiteWorkflowStore:
             conn.execute(
                 "UPDATE idempotency_records SET response_json=?, updated_at=? WHERE operation=? AND simulation_id=? AND request_id=?",
                 (encoded, now, operation, simulation_id, request_id),
+            )
+            conn.commit()
+
+    def append_audit_record(self, *, event_type: str, actor_id: str, request_id: Optional[str],
+                            simulation_id: Optional[str], details: Dict[str, Any]) -> None:
+        """Append a hash-chained, redacted audit record; no update/delete API exists."""
+        now = datetime.now(timezone.utc).isoformat()
+        encoded = json.dumps(details, sort_keys=True, default=self._json_default)
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute("SELECT record_hash FROM audit_records ORDER BY sequence DESC LIMIT 1").fetchone()
+            previous_hash = previous["record_hash"] if previous else None
+            material = "|".join([now, event_type, actor_id, request_id or "", simulation_id or "", encoded, previous_hash or ""])
+            record_hash = hashlib.sha256(material.encode()).hexdigest()
+            conn.execute(
+                """INSERT INTO audit_records
+                (recorded_at,event_type,actor_id,request_id,simulation_id,details_json,previous_hash,record_hash)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (now, event_type, actor_id, request_id, simulation_id, encoded, previous_hash, record_hash),
             )
             conn.commit()
 
