@@ -35,6 +35,8 @@ def current_principal(credentials: HTTPAuthorizationCredentials | None = Depends
 
 
 def enforce_owner(principal: Principal, owner_id: str) -> None:
+    if not AUTH_REQUIRED:
+        return
     if principal.actor_id != owner_id and not principal.roles.intersection({"reviewer", "override", "admin"}):
         raise HTTPException(status_code=403, detail={"error_code": "SIMULATION_OWNERSHIP_REQUIRED"})
 

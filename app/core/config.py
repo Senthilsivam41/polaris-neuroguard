@@ -21,6 +21,7 @@ GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 OFFLINE_MODE: bool = os.getenv("OFFLINE_MODE", "false").lower() == "true"
 MOCK_MODE: bool = os.getenv("MOCK_MODE", "false").lower() == "true"
+IS_OFFLINE: bool = OFFLINE_MODE or MOCK_MODE
 
 # Timeout and Retry configuration
 GEMINI_TIMEOUT: float = float(os.getenv("GEMINI_TIMEOUT", "30.0"))
@@ -37,7 +38,7 @@ API_TOKENS_JSON: str = os.getenv("POLARIS_API_TOKENS", "{}")
 ALLOWED_ORIGINS: list[str] = [origin.strip() for origin in os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
 ).split(",") if origin.strip()]
-RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
+RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "99999" if IS_OFFLINE else "60"))
 MAX_REQUEST_BYTES: int = int(os.getenv("MAX_REQUEST_BYTES", "65536"))
 REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
 

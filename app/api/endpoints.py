@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Tuple, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from app.core.simulation import execute_turn, Vector2D, EnvironmentStorm, PRESET_STORMS, Iceberg
-from app.core.config import BASE_BURN_RATE
+from app.core.config import BASE_BURN_RATE, AUTH_REQUIRED
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.sessions.session import Session as AdkSession
@@ -305,7 +305,7 @@ def register_simulation(profile: UserProfile, principal: Principal = Depends(cur
     """Registers a user profile containing role, scale, industry, anchor goals, and risk tolerance.
     Initializes simulation coordinates at (0,0) with destination targets set and baseline GoalContract (v1).
     """
-    if principal.actor_id != profile.user_id and not principal.roles.intersection({"admin", "override"}):
+    if AUTH_REQUIRED and principal.actor_id != profile.user_id and not principal.roles.intersection({"admin", "override"}):
         raise HTTPException(status_code=403, detail={"error_code": "PROFILE_OWNERSHIP_REQUIRED"})
     sim_id = str(uuid.uuid4())
     contract_id = f"contract-{sim_id}"
