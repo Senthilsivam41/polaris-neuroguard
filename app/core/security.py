@@ -10,6 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from app.core.config import API_TOKENS, AUTH_REQUIRED
+from app.core.observability import start_trace
 from app.core.persistence import workflow_store
 
 _bearer = HTTPBearer(auto_error=False)
@@ -63,4 +64,7 @@ class A2AAuthMiddleware(BaseHTTPMiddleware):
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer" or token not in API_TOKENS:
             return JSONResponse(status_code=401, content={"detail": {"error_code": "AUTHENTICATION_REQUIRED"}})
-        return await call_next(request)
+        trace_id = start_trace(request.headers.get("X-Trace-Id"))
+        response = await call_next(request)
+        response.headers["X-Trace-Id"] = trace_id
+        return response

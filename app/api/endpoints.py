@@ -1,6 +1,7 @@
 import uuid
 import threading
 import asyncio
+import time
 from enum import Enum
 from typing import Dict, Any, List, Tuple, Optional
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,6 +32,7 @@ from app.core.persistence import (
     IdempotencyConflictError,
 )
 from app.core.security import Principal, audit_event, current_principal, enforce_owner
+from app.core.observability import metrics
 
 router = APIRouter()
 
@@ -518,15 +520,21 @@ async def evaluate_decision(payload: EvaluateDecisionRequest, principal: Princip
     
     # 3. Execute ADK workflow graph via the runner
     invocation_id = str(uuid.uuid4())
+    workflow_started = time.monotonic()
+    metrics.increment("workflow_executions_total")
     events = []
-    async for event in runner.run_async(
-        user_id=profile["user_id"],
-        session_id=sim_id,
-        invocation_id=invocation_id,
-        new_message=types.Content(role="user", parts=[types.Part(text="{}")]),
-        state_delta=init_state
-    ):
-        events.append(event)
+    try:
+        async for event in runner.run_async(
+            user_id=profile["user_id"],
+            session_id=sim_id,
+            invocation_id=invocation_id,
+            new_message=types.Content(role="user", parts=[types.Part(text="{}")]),
+            state_delta=init_state
+        ):
+            events.append(event)
+    except Exception:
+        metrics.increment("workflow_failures_total")
+        raise
         
     # 4. Fetch the final updated state from the ADK Session
     adk_session = runner.session_service.get_session_sync(
@@ -658,6 +666,11 @@ async def evaluate_decision(payload: EvaluateDecisionRequest, principal: Princip
         active_constraints=active_constraints
     )
     workflow_store.complete_idempotency("evaluate", sim_id, request_id, response.model_dump())
+    metrics.observe("workflow", time.monotonic() - workflow_started, {"status": status})
+    if state.hitl_interrupted:
+        metrics.increment("hitl_interruptions_total", {"reason": state.hitl_reason[:64]})
+    if state.drift_warning:
+        metrics.increment("drift_warnings_total", {"category": "angular"})
     audit_event("decision_evaluated", actor_id=principal.actor_id, request_id=request_id, simulation_id=sim_id,
                 details={"status": status, "deadlocks": state.active_deadlocks, "model": "configured"})
     return response
@@ -703,6 +716,7 @@ async def resume_simulation(simulation_id: str, payload: ResumeSimulationRequest
     )
     _save_session(simulation_id, session, session_version)
     workflow_store.complete_idempotency("resume", simulation_id, payload.resume_request_id, response)
+    metrics.increment("workflow_resumes_total", {"status": response["resume_status"]})
     audit_event("simulation_resumed", actor_id=principal.actor_id, request_id=payload.resume_request_id,
                 simulation_id=simulation_id, details={"checkpoint_id": payload.checkpoint_id, "status": response["resume_status"]})
     return response
