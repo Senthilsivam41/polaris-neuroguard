@@ -44,6 +44,7 @@ REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"
 
 # Phase 7 observability labels. Never use request IDs, actors, or prompts as metric labels.
 DEPLOYMENT_ENV: str = os.getenv("DEPLOYMENT_ENV", "development")
+MODEL_COST_PER_WORKFLOW_USD: float = float(os.getenv("MODEL_COST_PER_WORKFLOW_USD", "0"))
 
 try:
     API_TOKENS: dict[str, dict] = json.loads(API_TOKENS_JSON)
@@ -74,6 +75,8 @@ def validate_config():
         raise ValueError("ADK_RETRY_BACKOFF_FACTOR must be greater than or equal to 1.0.")
     if RATE_LIMIT_PER_MINUTE <= 0 or MAX_REQUEST_BYTES <= 0 or REQUEST_TIMEOUT_SECONDS <= 0:
         raise ValueError("Phase 6 rate, size, and timeout settings must be positive.")
+    if MODEL_COST_PER_WORKFLOW_USD < 0:
+        raise ValueError("MODEL_COST_PER_WORKFLOW_USD must be non-negative.")
     
     # Require GEMINI_API_KEY unless explicitly in offline/mock mode
     is_offline = OFFLINE_MODE or MOCK_MODE

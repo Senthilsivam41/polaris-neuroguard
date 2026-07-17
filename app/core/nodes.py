@@ -1,3 +1,4 @@
+import time
 from typing import List, Dict, Any
 from google.adk.workflow import node, Workflow, Edge, START, RetryConfig
 from google.adk.agents.context import Context
@@ -17,6 +18,7 @@ from app.core.simulation import (
 )
 
 from app.core.config import BASE_BURN_RATE, WORKFLOW_RETRY_CONFIG
+from app.core.observability import metrics
 
 class UnknownStormError(ValueError):
     """Deterministic validation error raised when an unrecognized storm name is passed to weather_station."""
@@ -32,6 +34,8 @@ WORKFLOW_NODE_RETRY_CONFIG = RetryConfig(
 
 @node(retry_config=WORKFLOW_NODE_RETRY_CONFIG)
 def weather_station(ctx: Context, active_storms: list[str], custom_storms: dict[str, StormModel]) -> list[StormModel]:
+    node_started = time.monotonic()
+    metrics.increment("node_executions_total", {"node": "weather_station"})
     # Enforce typed state contract at node entry
     typed_state = get_typed_state(ctx.state)
     
@@ -61,10 +65,14 @@ def weather_station(ctx: Context, active_storms: list[str], custom_storms: dict[
         {"resolved_storms": [s.model_dump() for s in resolved]},
         validate_transition=False
     )
+    metrics.observe("node_execution", time.monotonic() - node_started,
+                    {"node": "weather_station", "status": "success"})
     return resolved
 
 @node(retry_config=WORKFLOW_NODE_RETRY_CONFIG)
 def path_simulator(ctx: Context) -> dict:
+    node_started = time.monotonic()
+    metrics.increment("node_executions_total", {"node": "path_simulator"})
     # 1. Enforce typed state contract at boundary entry
     state = get_typed_state(ctx.state)
     
@@ -198,6 +206,8 @@ def path_simulator(ctx: Context) -> dict:
     # Enforce validation and state transition rules on node exit
     update_typed_state(ctx.state, delta_update, validate_transition=True)
     
+    metrics.observe("node_execution", time.monotonic() - node_started,
+                    {"node": "path_simulator", "status": "success"})
     return {
         "current_position": new_pos,
         "resultant_vector": resultant_v,
