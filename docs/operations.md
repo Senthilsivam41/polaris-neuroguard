@@ -6,8 +6,9 @@ Scrape `GET /metrics` with Prometheus. Build environment-separated dashboards us
 
 - API latency: `polaris_api_request_seconds` p50, p95, and p99.
 - Workflow latency: `polaris_workflow_seconds` p50, p95, and p99.
-- Reliability: `polaris_workflow_executions_total`, `polaris_api_timeouts_total`, and HTTP status-labelled request counts.
-- Decision quality: `polaris_drift_warnings_total` and `polaris_hitl_interruptions_total`.
+- Reliability: `polaris_workflow_executions_total`, `polaris_node_executions_total`, `polaris_api_timeouts_total`, `polaris_a2a_failures_total`, and HTTP status-labelled request counts.
+- Decision quality: `polaris_drift_warnings_total`, `polaris_hitl_interruptions_total`, and `polaris_workflow_resumes_total` (use amendment/override outcomes to monitor false positives).
+- Cost: `polaris_model_cost_usd_total`; set `MODEL_COST_PER_WORKFLOW_USD` to the provider's measured per-workflow estimate.
 - Recovery: `polaris_workflow_resumes_total` by outcome.
 
 ## Alerts and ownership
@@ -19,6 +20,8 @@ Scrape `GET /metrics` with Prometheus. Build environment-separated dashboards us
 | Version conflicts | >=5 observed conflicts | platform-oncall | Check duplicate clients and retry behavior; retain the winning durable session version. |
 | Stuck interruptions | >=5 interruptions | workflow-owner | Review checkpoint reason and apply an authorized resume or amendment decision. |
 | Drift spike | sustained warning increase | product-owner | Review active storms, constraints, and false-positive overrides. |
+| A2A outage | Any A2A failure | platform-oncall | Inspect the propagated trace ID and remote-node health, then fail over or disable the remote node. |
+| Model cost | configured cumulative budget exceeded | platform-oncall | Verify usage, token accounting, and model selection before raising the budget. |
 
 `GET /api/v1/operations/alerts` exposes the in-process threshold evaluation for authenticated operators. Production alert routing should page the listed owner through the deployment's alert manager.
 

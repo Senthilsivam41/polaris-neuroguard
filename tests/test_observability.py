@@ -21,3 +21,9 @@ class TestObservability(unittest.TestCase):
         self.assertTrue(active)
         self.assertTrue(all(alert.owner for alert in active))
 
+    def test_a2a_and_cost_alerts_are_evaluated(self):
+        registry = MetricsRegistry()
+        registry.increment("a2a_failures_total")
+        registry.increment("model_cost_usd_total", value=100)
+        names = {alert.name for alert in AlertEvaluator(registry).evaluate()}
+        self.assertEqual({"a2a_outage", "model_cost"}, names)

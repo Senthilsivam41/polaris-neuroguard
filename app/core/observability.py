@@ -1,12 +1,10 @@
 """Dependency-light tracing, metrics, and alert evaluation for Phase 7."""
 
 import contextvars
-import statistics
-import time
 import uuid
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, Optional
+from typing import Deque, Dict, Optional
 
 trace_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default="")
 
@@ -77,13 +75,18 @@ class AlertEvaluator:
     def evaluate(self) -> list[Alert]:
         alerts: list[Alert] = []
         for (name, labels), count in self.metrics.counters.items():
-            label_map = dict(labels)
             if name == "workflow_failures_total" and count >= 1:
                 alerts.append(Alert("workflow_failure", "critical", "platform-oncall", "Workflow failure detected."))
+            if name == "a2a_failures_total" and count >= 1:
+                alerts.append(Alert("a2a_outage", "critical", "platform-oncall", "A2A request failure detected."))
             if name == "session_version_conflicts_total" and count >= 5:
                 alerts.append(Alert("version_conflicts", "warning", "platform-oncall", "High optimistic-concurrency conflict rate."))
             if name == "hitl_interruptions_total" and count >= 5:
                 alerts.append(Alert("stuck_interruptions", "warning", "workflow-owner", "Repeated HITL interruptions require review."))
+            if name == "drift_warnings_total" and count >= 10:
+                alerts.append(Alert("drift_spike", "warning", "product-owner", "High strategic drift warning volume."))
+            if name == "model_cost_usd_total" and count >= 100:
+                alerts.append(Alert("model_cost", "warning", "platform-oncall", "Configured model-cost budget threshold exceeded."))
         for (name, labels), _ in self.metrics.latencies.items():
             p95 = self.metrics.percentiles(name, dict(labels))["p95"]
             if name in {"api_request", "workflow"} and p95 > 2.0:

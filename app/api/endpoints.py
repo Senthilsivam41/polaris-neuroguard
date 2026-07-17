@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Tuple, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from app.core.simulation import execute_turn, Vector2D, EnvironmentStorm, PRESET_STORMS, Iceberg
-from app.core.config import BASE_BURN_RATE, AUTH_REQUIRED
+from app.core.config import BASE_BURN_RATE, AUTH_REQUIRED, MODEL_COST_PER_WORKFLOW_USD
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.sessions.session import Session as AdkSession
@@ -280,6 +280,7 @@ def _save_session(simulation_id: str, session: Dict[str, Any], version: int) -> 
     try:
         next_version = workflow_store.save_session(simulation_id, session, version)
     except VersionConflictError as exc:
+        metrics.increment("session_version_conflicts_total")
         raise HTTPException(status_code=409, detail={"error_code": "SESSION_VERSION_CONFLICT", "message": str(exc)}) from exc
     with sessions_lock:
         sessions[simulation_id] = session
@@ -667,8 +668,9 @@ async def evaluate_decision(payload: EvaluateDecisionRequest, principal: Princip
     )
     workflow_store.complete_idempotency("evaluate", sim_id, request_id, response.model_dump())
     metrics.observe("workflow", time.monotonic() - workflow_started, {"status": status})
+    metrics.increment("model_cost_usd_total", value=MODEL_COST_PER_WORKFLOW_USD)
     if state.hitl_interrupted:
-        metrics.increment("hitl_interruptions_total", {"reason": state.hitl_reason[:64]})
+        metrics.increment("hitl_interruptions_total", {"category": "guardrail"})
     if state.drift_warning:
         metrics.increment("drift_warnings_total", {"category": "angular"})
     audit_event("decision_evaluated", actor_id=principal.actor_id, request_id=request_id, simulation_id=sim_id,
