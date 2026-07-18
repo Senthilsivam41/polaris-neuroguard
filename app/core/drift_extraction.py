@@ -117,7 +117,7 @@ def extract_structured_changes(
     ]
     for c in known_constraints:
         c_clean = c.lower().replace("_", " ")
-        if f"add constraint {c_clean}" in text_lower or f"require {c_clean}" in text_lower or c in raw_request_text:
+        if f"add constraint {c_clean}" in text_lower or f"require {c_clean}" in text_lower or c_clean in text_lower or c in raw_request_text:
             constraint_additions.append(c)
         elif f"remove constraint {c_clean}" in text_lower or f"drop {c_clean}" in text_lower or f"cancel {c_clean}" in text_lower:
             constraint_removals.append(c)
@@ -129,8 +129,8 @@ def extract_structured_changes(
 
     # 8. Scope / Deliverable Additions
     scope_additions: List[str] = []
-    if any(k in text_lower for k in ["add scope", "include", "expand scope", "add deliverable", "add "]):
-        match = re.search(r"(?:include|add scope|add deliverable|add)\s*[:\-]?\s*([^\.\n,]+?)(?:\s+deliverable|\s+scope|\.|\n|$)", raw_request_text, re.IGNORECASE)
+    if any(k in text_lower for k in ["add scope", "include", "expand scope", "add deliverable", "add ", "also build"]):
+        match = re.search(r"(?:include|add scope|add deliverable|add|also build)\s*[:\-]?\s*([^\.\n,]+?)(?:\s+deliverable|\s+scope|\.|\n|$)", raw_request_text, re.IGNORECASE)
         if match:
             item = match.group(1).strip()
             # Exclude budget numbers, numeric values, or constraints
@@ -140,8 +140,8 @@ def extract_structured_changes(
 
     # 9. Objective replacement check
     objective_changes: Optional[str] = None
-    if "replace objective" in text_lower or "pivot goal" in text_lower or "new objective" in text_lower:
-        match = re.search(r"(?:replace objective|new objective|pivot goal)\s*(?:with|to|:)?\s*([^\.\n]+)", raw_request_text, re.IGNORECASE)
+    if "replace objective" in text_lower or "replace the migration goal" in text_lower or "pivot goal" in text_lower or "new objective" in text_lower:
+        match = re.search(r"(?:replace objective|replace the migration goal|new objective|pivot goal)\s*(?:with|to|:)?\s*([^\.\n]+)", raw_request_text, re.IGNORECASE)
         if match:
             objective_changes = match.group(1).strip()
             evidence_parts.append(f"Extracted objective replacement: '{objective_changes}'")

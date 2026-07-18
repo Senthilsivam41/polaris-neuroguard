@@ -1,0 +1,27 @@
+name: Quality Gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend-quality:
+    runs-on: ubuntu-latest
+    env:
+      OFFLINE_MODE: "true"
+      AUTH_REQUIRED: "false"
+      POLARIS_API_TOKENS: '{}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11', cache: pip}
+      - run: python -m pip install --upgrade pip && pip install -r requirements.txt
+      - run: python -m compileall -q app tests && pip check
+      - run: python -m unittest discover -s tests -v | tee test-report.txt
+      - run: python -m unittest tests.test_phase8_benchmark tests.test_phase8_reliability tests.test_phase8_performance -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quality-reports
+          path: test-report.txt
