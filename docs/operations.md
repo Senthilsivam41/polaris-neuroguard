@@ -23,7 +23,18 @@ Scrape `GET /metrics` with Prometheus. Build environment-separated dashboards us
 | A2A outage | Any A2A failure | platform-oncall | Inspect the propagated trace ID and remote-node health, then fail over or disable the remote node. |
 | Model cost | configured cumulative budget exceeded | platform-oncall | Verify usage, token accounting, and model selection before raising the budget. |
 
-`GET /api/v1/operations/alerts` exposes the in-process threshold evaluation for authenticated operators. Production alert routing should page the listed owner through the deployment's alert manager.
+`GET /api/v1/operations/alerts` exposes the in-process threshold evaluation for authenticated operators.
+
+## Alert routing (production wiring)
+
+In-process evaluation is the source of truth for threshold logic. Production deployments should:
+
+1. Scrape `GET /metrics` with Prometheus (separate scrape configs per environment label).
+2. Mirror the table above as PrometheusRule / Alertmanager routes that page the listed owner.
+3. Forward `X-Trace-Id` from the failing request into the page payload so on-call can correlate ADK logs.
+4. Keep `AUTH_REQUIRED=true` on `/api/v1/operations/alerts`; operators use a scoped bearer token, not anonymous scrape credentials.
+
+Until Alertmanager is wired, treat `GET /api/v1/operations/alerts` as the operator console and escalate manually using the Owner column.
 
 ## Trace handling
 

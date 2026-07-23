@@ -4,9 +4,9 @@
 
 Polaris Neuro Guard is a strategic simulation platform built with Python and FastAPI. It models an enterprise initiative ("The Ship") steering toward a strategic objective ("The Mountain") through systemic constraints ("The Icebergs"). The platform calculates and prevents strategic drift under macro-environmental volatility using vector mechanics and deadlock detection.
 
-## 🎉 Milestone Achieved: Phases 1 to 6 Complete
+## Milestone Achieved: Phases 1 to 8 Complete
 
-Polaris Neuro Guard has achieved a major development milestone with the complete implementation, integration, and test verification of **Phases 1 through 6**:
+Polaris Neuro Guard has achieved a major development milestone with the complete implementation, integration, and test verification of **Phases 1 through 8**:
 
 1. **Phase 1: Core Simulation Mechanics**
    - 2D vector physics engine calculating steering intent vs. resultant trajectory.
@@ -42,6 +42,16 @@ Polaris Neuro Guard has achieved a major development milestone with the complete
    - Bearer-token authentication with simulation ownership enforcement and reviewer/override role support.
    - Authenticated A2A node apps, configured CORS origins, request-size limits, rate limiting, and request timeouts.
    - Append-only, hash-chained audit records with sensitive-field redaction for registrations, decisions, drift/amendment actions, storm injections, and HITL resumes.
+
+7. **Phase 7: Observability & Operations**
+   - Dependency-light Prometheus text metrics at `GET /metrics` and authenticated alert evaluation at `GET /api/v1/operations/alerts`.
+   - Trace ID propagation via `X-Trace-Id` and workflow/node latency histograms.
+   - Operator runbook in [docs/operations.md](docs/operations.md) covering panels, thresholds, and ownership.
+
+8. **Phase 8: Evaluation & Quality Gates**
+   - Versioned drift-benchmark corpus with ≥75% release accuracy gate.
+   - Concurrent deterministic SLO checks (&lt;200ms), durable-store concurrency/replay, and audit hash-chain integrity tests.
+   - CI quality workflow runs the Phase 8 suites on every push/PR.
 
 ## 🔄 Idempotency & Retry Policy
 
@@ -98,6 +108,14 @@ uvicorn app.main:app --reload
 The server will start at `http://127.0.0.1:8000`. You can verify the setup by visiting `http://127.0.0.1:8000/health`.
 
 Protected `/api/v1` and A2A operations require `Authorization: Bearer <token>`. For local offline/mock development only, set `OFFLINE_MODE=true` or `MOCK_MODE=true`; the development token is `dev-local-token`.
+
+### Frontend cockpit
+
+```bash
+cd frontend && npm install && npm run dev
+```
+
+The Vite app proxies `/api` to `http://127.0.0.1:8000`. Onboarding accepts a Bearer token (defaults to `dev-local-token`). When a guardrail pauses the simulation, FractureModal calls `POST /resume` with the checkpoint metadata returned on the evaluate response. The right-rail **Goal Contract Amendment** panel submits change requests, runs drift evaluation, and confirms/rejects amendments.
 
 ### Security Controls
 
