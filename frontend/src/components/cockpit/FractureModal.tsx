@@ -1,18 +1,30 @@
+import { useState } from 'react';
 import { useSimulationStore } from '../../store/useSimulationStore';
-import { ShieldAlert, RefreshCw, XCircle, Goal } from 'lucide-react';
+import { ShieldAlert, RefreshCw, XCircle, Goal, Loader2 } from 'lucide-react';
 
 export default function FractureModal() {
   const store = useSimulationStore();
   const hitl = store.hitlData;
+  const [clearDeadlocks, setClearDeadlocks] = useState(true);
 
   if (!hitl) return null;
 
   const profile = store.userProfile;
+  const snapshot = hitl.telemetry_snapshot || {};
+  const deadlocks = (snapshot.deadlocks as [string, string][] | undefined) || [];
+  const threats = (snapshot.threats as string[] | undefined) || store.collisionThreats || [];
+  const canResume = Boolean(hitl.checkpoint_id && hitl.checkpoint_version);
+
+  const handleResume = async () => {
+    const constraints = clearDeadlocks ? [] : store.lastConstraints;
+    const action = clearDeadlocks
+      ? 'Cleared opposing constraints and resumed from checkpoint.'
+      : 'Acknowledged guardrail and resumed with prior constraints.';
+    await store.resumeFromGuardrail(action, constraints);
+  };
 
   return (
     <div className="fixed inset-0 bg-red-950/80 backdrop-blur-md z-50 flex items-center justify-center p-6">
-      
-      {/* Inject custom shake style for the panel vibration */}
       <style>{`
         @keyframes shake {
           0%, 100% { transform: translate(0, 0); }
@@ -32,8 +44,6 @@ export default function FractureModal() {
       `}</style>
 
       <div className="bg-[#0E1422] border-2 border-alert-crimson shadow-2xl shadow-red-500/20 max-w-lg w-full rounded-lg p-6 flex flex-col space-y-5 text-center relative overflow-hidden vibrate-panel">
-        
-        {/* Warning Indicator */}
         <div className="flex justify-center">
           <ShieldAlert className="w-12 h-12 text-alert-crimson animate-bounce" />
         </div>
@@ -43,36 +53,37 @@ export default function FractureModal() {
             ADK 2.0 GUARDRAIL INTERCEPT
           </h2>
           <p className="text-[10px] text-slate-400 font-mono">
-            Graph Execution Halted • SMT Verification Breach
+            Graph Execution Halted • Constraint Conflict / Collision
           </p>
         </div>
 
-        {/* Breach Description */}
         <div className="bg-red-950/20 border border-alert-crimson/30 rounded p-3 text-xs text-slate-300 font-mono text-left">
           <p className="font-bold text-alert-crimson mb-1 flex items-center space-x-1.5">
             <XCircle className="w-3.5 h-3.5" />
             <span>INTERCEPTION REASON:</span>
           </p>
           <p className="leading-relaxed text-slate-400">{hitl.reason}</p>
+          {hitl.checkpoint_id && (
+            <p className="mt-2 text-[10px] text-slate-500">
+              CHECKPOINT: {hitl.checkpoint_id} · v{hitl.checkpoint_version}
+            </p>
+          )}
         </div>
 
-        {/* Side-by-Side Contradiction & Goal Matrix */}
         <div className="grid grid-cols-2 gap-4 text-left text-xs font-mono">
-          
-          {/* Left Column: Contradiction Details */}
           <div className="bg-slate-950/40 border border-[#2A3754] rounded p-3 space-y-2">
             <h4 className="text-[10px] font-bold text-alert-crimson uppercase tracking-widest">
               Mathematical Defect
             </h4>
             <div className="text-[10px] space-y-1 text-slate-400">
-              <p><span className="text-slate-600">DEADLOCKS:</span> {hitl.telemetry_snapshot.deadlocks.length > 0 ? "TRUE" : "FALSE"}</p>
-              {hitl.telemetry_snapshot.deadlocks.map((pair: [string, string], i: number) => (
+              <p><span className="text-slate-600">DEADLOCKS:</span> {deadlocks.length > 0 ? 'TRUE' : 'FALSE'}</p>
+              {deadlocks.map((pair, i) => (
                 <p key={i} className="text-alert-crimson font-bold">
                   {pair[0]} ⟷ {pair[1]}
                 </p>
               ))}
-              <p className="mt-1"><span className="text-slate-600">COLLISIONS:</span> {hitl.telemetry_snapshot.threats.length > 0 ? "TRUE" : "FALSE"}</p>
-              {hitl.telemetry_snapshot.threats.map((threat: string, i: number) => (
+              <p className="mt-1"><span className="text-slate-600">COLLISIONS:</span> {threats.length > 0 ? 'TRUE' : 'FALSE'}</p>
+              {threats.map((threat, i) => (
                 <p key={i} className="text-alert-crimson font-bold">
                   {threat}
                 </p>
@@ -80,7 +91,6 @@ export default function FractureModal() {
             </div>
           </div>
 
-          {/* Right Column: Original Anchor Goal Bounds */}
           <div className="bg-slate-950/40 border border-[#2A3754] rounded p-3 space-y-2">
             <h4 className="text-[10px] font-bold text-accent-cyan uppercase tracking-widest flex items-center space-x-1">
               <Goal className="w-3 h-3" />
@@ -95,18 +105,30 @@ export default function FractureModal() {
               </div>
             )}
           </div>
-
         </div>
 
-        {/* Remediate Action Button */}
-        <button 
-          onClick={() => store.clearHITL()}
-          className="w-full bg-alert-crimson hover:bg-[#E62E5C] text-slate-100 font-mono font-bold text-xs py-2.5 rounded transition-colors flex items-center justify-center space-x-2 border border-alert-crimson/50"
-        >
-          <RefreshCw className="w-4 h-4" />
-          <span>REMEDIATE PATH CONSTRAINTS</span>
-        </button>
+        <label className="flex items-center justify-center space-x-2 text-[10px] font-mono text-slate-400 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={clearDeadlocks}
+            onChange={(e) => setClearDeadlocks(e.target.checked)}
+            className="accent-accent-cyan"
+          />
+          <span>Clear opposing constraints on resume</span>
+        </label>
 
+        {store.actionError && (
+          <p className="text-[10px] text-alert-crimson font-mono">{store.actionError}</p>
+        )}
+
+        <button
+          onClick={handleResume}
+          disabled={!canResume || store.isResuming}
+          className="w-full bg-alert-crimson hover:bg-[#E62E5C] disabled:opacity-50 disabled:cursor-not-allowed text-slate-100 font-mono font-bold text-xs py-2.5 rounded transition-colors flex items-center justify-center space-x-2 border border-alert-crimson/50"
+        >
+          {store.isResuming ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          <span>{canResume ? 'RESUME FROM CHECKPOINT' : 'CHECKPOINT UNAVAILABLE'}</span>
+        </button>
       </div>
     </div>
   );

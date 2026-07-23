@@ -47,7 +47,7 @@ The goal of Polaris Neuro Guard is to provide an enterprise-grade simulation eng
   | **Goal Analyzer Agent** | `LlmAgent` | Evaluates the user's declared intent vector against the registered `anchor_goal` and `risk_tolerance`. Produces a qualitative assessment that can flag intent that is strategically inconsistent with the stated goal (e.g. burning budget headroom to preserve heading). |
   | **Environmental Weather Station Agent** | `FunctionTool` wrapping `calculate_resultant_vector` | Deterministic — applies active storm vectors. Stays a pure function/tool. |
   | **Path Simulator Agent** | `FunctionTool` wrapping `execute_turn` position/burn-rate math | Deterministic — advances coordinates, computes burn rate, and executes look-ahead checks. |
-  | **Constraint Conflict Predictor Agent** | `LlmAgent` (with `FunctionTool` sub-call to `check_logical_deadlocks` for static pairs) | Runs SMT symbolic checks, then reasons over *novel* constraint phrasings that static pair lists would fail to catch. |
+  | **Constraint Conflict Predictor Agent** | `LlmAgent` (with `FunctionTool` sub-call to `check_logical_deadlocks` for static pairs) | Runs deterministic opposing-pair checks, then reasons over *novel* constraint phrasings that static pair lists would fail to catch. |
 
 * **FR-3.3:** Edges must route as follows, matching the intended data dependency flow:
   ```
@@ -59,7 +59,7 @@ The goal of Polaris Neuro Guard is to provide an enterprise-grade simulation eng
   ("PathSimulator", "end")
   ```
 * **FR-3.4:** Each node must define a `RetryConfig` (e.g., `RetryConfig(max_attempts=3)`), and node implementations must **not** catch bare `Exception` or `BaseException` internally. All exceptions must propagate up to the framework to allow automatic retries and HITL interruptions to function correctly.
-* **FR-3.5:** The four nodes must be independently exposable via A2A (`google.adk.a2a.to_a2a(agent)`), enabling swapping of local nodes for remote agents.
+* **FR-3.5:** The two LLM nodes (`goal_analyzer`, `constraint_predictor`) and the `simulation_workflow` must be independently exposable via A2A (`google.adk.a2a.to_a2a(...)`). Deterministic FunctionNodes (`weather_station`, `path_simulator`) remain local graph nodes; NFR-1.2 requires their telemetry to match across an A2A-style serialization swap harness (and live remote swap when available).
 
 ### 2.4 Mathematical Drift & Trajectory Calculations
 * **FR-4.1:** The system must compute the actual trajectory using 2D vector mechanics, executing vector addition of human strategic intent ($\vec{V}_a$) and environmental storm displacement ($\vec{V}_s$):
@@ -72,14 +72,14 @@ $$\sigma = |\theta_g - \theta_a|$$
 
 * **FR-4.3:** The engine must flag an active drift state whenever the delta angle ($\sigma$) exceeds a configuration threshold of $15^\circ$.
 
-### 2.5 SMT Constraint Verification & Human-in-the-Loop (HITL) Interception
-* **FR-5.1:** The Constraint Conflict Predictor must flag an immediate system deadlock if a user introduces mutually exclusive parameter configurations (e.g., setting a `RIGID_TIMELINE` boundary while simultaneously declaring a `FREEZE_HEADCOUNT` constraint during a storm event).
+### 2.5 Constraint Conflict Verification & Human-in-the-Loop (HITL) Interception
+* **FR-5.1:** The Constraint Conflict Predictor must flag an immediate system deadlock if a user introduces mutually exclusive parameter configurations (e.g., setting a `RIGID_TIMELINE` boundary while simultaneously declaring a `FREEZE_HEADCOUNT` constraint during a storm event). Verification is **neuro-symbolic**: a deterministic static opposing-pair checker covers known constraint pairs, and an `LlmAgent` reasons over novel phrasings that the static list would miss. A full SMT solver (e.g. Z3) is **out of scope** for this release; requirements that previously said "SMT" refer to this pair+LLM conflict layer.
 * **FR-5.2:** If a logical deadlock is detected, the engine must immediately drop the effective intent velocity magnitude ($v_a$) to $0$, representing an engine stall, while allowing environmental vectors to continue displacing the coordinates.
 * **FR-5.3:** The system must calculate a 3-turn forward trajectory projection. If the look-ahead coordinates fall within the danger radius ($R$) of a pre-configured constraint obstacle (Iceberg), the Path Simulator node **must** raise `NodeInterruptedError` to intercept progress.
 * **FR-5.4:** On `NodeInterruptedError`:
   1. The ADK 2.0 runtime must automatically persist the graph's session state (current node, position, burn rate, deadlock/collision context).
   2. The API layer must expose a separate resume endpoint `POST /simulation/{simulation_id}/resume` that accepts a human decision payload and re-enters the graph at the paused node. `POST /simulation/evaluate-decision` must be blocked and return a paused state if invoked while the simulation is interrupted.
-  3. The structured JSON payload returned at pause time must contain `reason` and `telemetry_snapshot` diagnostic states.
+  3. The structured JSON payload returned at pause time must contain `reason`, `telemetry_snapshot`, and when available `checkpoint_id` / `checkpoint_version` for resume.
 
 ### 2.6 API Security, Authorization & Auditability
 * **FR-6.1:** Protected API and A2A operations must require bearer-token authentication. Production deployments must configure tokens through `POLARIS_API_TOKENS`; offline/mock mode may provide an explicitly documented development token.
@@ -95,7 +95,7 @@ $$\sigma = |\theta_g - \theta_a|$$
 
 ### 3.1 Performance & Latency
 * **NFR-1.1:** The backend API must process a single evaluation turn—including vector addition, lookup checks, and collision projections—in less than 200ms under standard execution conditions.
-* **NFR-1.2:** All four graph nodes must be `to_a2a`-exposable, and execution under a local co-located graph and an A2A-swapped remote node configuration must yield identical telemetry output.
+* **NFR-1.2:** All four graph nodes must be `to_a2a`-exposable. Deterministic nodes (`weather_station`, `path_simulator`) must yield identical telemetry under a local co-located invocation and an A2A-swapped boundary that round-trips the same inputs (serialization hop or remote agent). Live multi-process remote parity is validated when the optional `a2a` SDK is present; otherwise an in-process swap harness is the release gate.
 
 ### 3.2 Extensibility & Architecture Constraints
 * **NFR-2.1:** The system code must follow a strict modular design pattern to seamlessly integrate with frontend canvas wrappers without modifying the underlying vector logic.
