@@ -1,0 +1,16 @@
+---
+description: Git branch naming convention for all changes
+alwaysApply: true
+---
+
+# Branch Naming
+
+When creating a git branch to implement changes, always name it `feature/<feature-name>`, where `<feature-name>` is a short kebab-case description of the change.
+
+Examples:
+
+- `feature/hitl-resume-wiring`
+- `feature/drift-benchmark-expansion`
+- `feature/frontend-bearer-auth`
+
+Do not use other prefixes (e.g. `cursor/`, `fix/`, `chore/`) unless the user explicitly asks for a different name.
