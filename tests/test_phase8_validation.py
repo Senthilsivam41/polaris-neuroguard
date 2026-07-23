@@ -59,7 +59,7 @@ class TestPhase8Validation(unittest.TestCase):
             predicted = "PROMPT_INJECTION" if extraction.prompt_injection_flag else (
                 "AMBIGUOUS" if extraction.ambiguity_flags else (
                     "OBJECTIVE_REPLACEMENT" if "OBJECTIVE_REPLACEMENT" in labels else
-                    "CONSTRAINT_CONFLICT" if "CONSTRAINT_CONFLICT" in labels else
+                    "CONSTRAINT_CONFLICT" if labels.intersection({"CONSTRAINT_CONFLICT", "DIRECT_CONSTRAINT_CONTRADICTION"}) else
                     "SCOPE_EXTENSION" if (extraction.scope_additions or extraction.deliverable_additions) else "NO_DRIFT"
                 )
             )
