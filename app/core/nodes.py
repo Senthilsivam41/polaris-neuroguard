@@ -234,12 +234,12 @@ simulation_workflow = Workflow(
     ]
 )
 
-# FR-3.5 / NFR-1.2: all four nodes must be to_a2a-exposable so they can be
-# swapped for remote agents without changing the workflow graph.
-# get_a2a_nodes() is a lazy factory: calling it requires the google-adk[a2a]
-# extra (and its a2a dependency). The function is importable regardless.
+# FR-3.5 / NFR-1.2: LlmAgent nodes and the Workflow are to_a2a-exposable.
+# Deterministic FunctionNodes (weather_station, path_simulator) prove swap
+# parity via the in-process serialization harness in tests/test_a2a.py —
+# ADK's to_a2a() requires BaseAgent|Workflow, not bare FunctionNode.
 def get_a2a_nodes() -> dict:
-    """Return A2A Starlette apps for all four simulation nodes.
+    """Return A2A Starlette apps for exposable simulation agents/workflow.
 
     Requires google-adk[a2a] to be installed. Raises ImportError if the
     'a2a' package is missing from the environment.
@@ -249,8 +249,7 @@ def get_a2a_nodes() -> dict:
     nodes = {
         "goal_analyzer": _to_a2a(goal_analyzer),
         "constraint_predictor": _to_a2a(constraint_predictor),
-        "weather_station": _to_a2a(weather_station),
-        "path_simulator": _to_a2a(path_simulator),
+        "simulation_workflow": _to_a2a(simulation_workflow),
     }
     for app in nodes.values():
         app.add_middleware(A2AAuthMiddleware)
