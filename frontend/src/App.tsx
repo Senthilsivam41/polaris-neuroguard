@@ -4,6 +4,7 @@ import ControlPanel from './components/cockpit/ControlPanel';
 import TacticalMap from './components/cockpit/TacticalMap';
 import TelemetryAnalytics from './components/cockpit/TelemetryAnalytics';
 import FractureModal from './components/cockpit/FractureModal';
+import AmendmentPanel from './components/cockpit/AmendmentPanel';
 
 export default function App() {
   const store = useSimulationStore();
@@ -144,6 +145,10 @@ export default function App() {
           </div>
           
           <TelemetryAnalytics />
+          <AmendmentPanel />
+          {store.actionError && store.currentSimulationId !== 'Not Initialized' && (
+            <p className="mt-3 text-[10px] font-mono text-alert-crimson">{store.actionError}</p>
+          )}
         </aside>
 
       </div>
