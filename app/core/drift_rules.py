@@ -10,6 +10,7 @@ from app.core.drift_models import ExtractedChangeRequest, RuleFinding, DriftSeve
 
 
 OPPOSING_CONSTRAINT_PAIRS = [
+    ("RIGID_TIMELINE", "FREEZE_HEADCOUNT"),
     ("RIGID_TIMELINE", "EXTEND_SCHEDULE"),
     ("FREEZE_HEADCOUNT", "EXPAND_SCOPE"),
     ("REDUCE_COST", "EXPAND_SCOPE"),
@@ -56,7 +57,7 @@ def evaluate_deterministic_rules(
                 rule_id=f"RULE-CONSTR-PAIR-{c_a}-{c_b}",
                 category="DIRECT_CONSTRAINT_CONTRADICTION",
                 triggered_fields=["constraints"],
-                evidence=f"Direct SMT logical contradiction between active constraints '{c_a}' and '{c_b}'.",
+                evidence=f"Direct opposing-pair contradiction between active constraints '{c_a}' and '{c_b}'.",
                 severity_contribution=DriftSeverity.HIGH,
                 confidence=1.0
             ))

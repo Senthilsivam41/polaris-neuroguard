@@ -14,6 +14,8 @@ PROMPT_INJECTION_PATTERNS = [
     r"ignore (all )?(previous|above|prior) (instructions|directions|rules)",
     r"bypass (all )?(security|guardrails|filters|rules)",
     r"forget (all )?(previous|prior) (rules|instructions)",
+    r"disregard (the )?(goal contract|previous|prior|all).*(instructions|prompt|contract)?",
+    r"reveal (the |your )?(hidden )?system (prompt|instructions)",
     r"system prompt:",
     r"override security",
     r"you are now in god mode",
@@ -129,21 +131,34 @@ def extract_structured_changes(
 
     # 8. Scope / Deliverable Additions
     scope_additions: List[str] = []
-    if any(k in text_lower for k in ["add scope", "include", "expand scope", "add deliverable", "add ", "also build"]):
-        match = re.search(r"(?:include|add scope|add deliverable|add|also build)\s*[:\-]?\s*([^\.\n,]+?)(?:\s+deliverable|\s+scope|\.|\n|$)", raw_request_text, re.IGNORECASE)
+    if any(k in text_lower for k in ["add scope", "include", "expand scope", "add deliverable", "add ", "also build", "double the delivery scope"]):
+        match = re.search(
+            r"(?:include|add scope|add deliverable|add|also build|double the delivery scope(?: for free)?)\s*[:\-]?\s*([^\.\n,]+?)(?:\s+deliverable|\s+scope|\.|\n|$)",
+            raw_request_text,
+            re.IGNORECASE,
+        )
         if match:
             item = match.group(1).strip()
             # Exclude budget numbers, numeric values, or constraints
             if item and not re.match(r"^[\$\d\.,\s]+$", item) and item.lower() not in ["constraint", "rigid timeline", "extend schedule"]:
                 scope_additions.append(item)
                 evidence_parts.append(f"Extracted scope addition: {item}")
+        elif "double the delivery scope" in text_lower:
+            scope_additions.append("doubled delivery scope")
+            evidence_parts.append("Extracted scope addition: doubled delivery scope")
 
     # 9. Objective replacement check
     objective_changes: Optional[str] = None
-    if "replace objective" in text_lower or "replace the migration goal" in text_lower or "pivot goal" in text_lower or "new objective" in text_lower:
-        match = re.search(r"(?:replace objective|replace the migration goal|new objective|pivot goal)\s*(?:with|to|:)?\s*([^\.\n]+)", raw_request_text, re.IGNORECASE)
+    if "replace objective" in text_lower or "replace the migration goal" in text_lower or "pivot goal" in text_lower or "new objective" in text_lower or "abandon the migration" in text_lower or "instead rebuild" in text_lower:
+        match = re.search(
+            r"(?:replace objective|replace the migration goal|new objective|pivot goal)\s*(?:with|to|:)?\s*([^\.\n]+)"
+            r"|abandon the migration and instead\s+([^\.\n]+)"
+            r"|instead rebuild\s+([^\.\n]+)",
+            raw_request_text,
+            re.IGNORECASE,
+        )
         if match:
-            objective_changes = match.group(1).strip()
+            objective_changes = next(g for g in match.groups() if g).strip()
             evidence_parts.append(f"Extracted objective replacement: '{objective_changes}'")
 
     if not evidence_parts:
