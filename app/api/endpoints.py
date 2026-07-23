@@ -171,6 +171,8 @@ class HITLInterceptionData(BaseModel):
     requires_intervention: bool = Field(..., description="Flags if Human-in-the-Loop intervention is required")
     reason: str = Field(..., description="Reason detail for the required intervention")
     telemetry_snapshot: Dict[str, Any] = Field(..., description="Diagnostic snapshot of the failure state")
+    checkpoint_id: Optional[str] = Field(None, description="Active durable checkpoint ID required for POST /resume")
+    checkpoint_version: Optional[int] = Field(None, description="Optimistic-lock version for the active checkpoint")
 
 class EvaluateDecisionResponse(BaseModel):
     simulation_id: str = Field(..., description="The simulation session ID")
@@ -555,13 +557,9 @@ async def evaluate_decision(payload: EvaluateDecisionRequest, principal: Princip
     status = "PAUSED_BY_GUARDRAIL" if state.hitl_interrupted else "RUNNING"
     
     hitl_data = None
-    if state.hitl_interrupted:
-        hitl_data = HITLInterceptionData(
-            requires_intervention=True,
-            reason=state.hitl_reason,
-            telemetry_snapshot=state.hitl_telemetry_snapshot
-        )
-        
+    checkpoint_id: Optional[str] = None
+    checkpoint_version: Optional[int] = None
+
     # 6. Update durable session and history using optimistic concurrency.
     if state.hitl_interrupted:
             # HITL-004: Do NOT mutate position/burn when paused. Preserve pre-interruption values.
@@ -606,12 +604,22 @@ async def evaluate_decision(payload: EvaluateDecisionRequest, principal: Princip
                     active_contract_id=session.get("active_contract_id"),
                     active_contract_version=session.get("active_contract_version"),
                 )
-                session["active_checkpoint_id"] = chk.checkpoint_id
-                session["active_checkpoint_version"] = chk.checkpoint_version
+                checkpoint_id = chk.checkpoint_id
+                checkpoint_version = chk.checkpoint_version
+                session["active_checkpoint_id"] = checkpoint_id
+                session["active_checkpoint_version"] = checkpoint_version
                 session["paused_interruption_id"] = interruption_payload.interruption_id
             except Exception:
                 # Checkpoint creation failure is non-fatal for the response
                 pass
+
+            hitl_data = HITLInterceptionData(
+                requires_intervention=True,
+                reason=state.hitl_reason,
+                telemetry_snapshot=state.hitl_telemetry_snapshot,
+                checkpoint_id=checkpoint_id,
+                checkpoint_version=checkpoint_version,
+            )
     else:
             # Only update position/burn when workflow completed without interruption
             session["current_position"] = state.current_position
