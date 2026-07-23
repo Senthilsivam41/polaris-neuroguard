@@ -164,6 +164,7 @@ export default function ControlPanel() {
   
   // Registration local form state
   const [userId, setUserId] = useState('user_dev_01');
+  const [apiToken, setApiToken] = useState(store.apiToken || 'dev-local-token');
   const [role, setRole] = useState('Chief Technology Officer');
   const [companyScale, setCompanyScale] = useState('Enterprise');
   const [industry, setIndustry] = useState('Maritime Logistics');
@@ -175,6 +176,7 @@ export default function ControlPanel() {
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
+    store.setApiToken(apiToken);
     await store.initializeSession({
       user_id: userId,
       role: role,
@@ -222,6 +224,17 @@ export default function ControlPanel() {
 
         <form onSubmit={handleRegister} className="flex-1 flex flex-col justify-between space-y-4 text-xs">
           <div className="space-y-3 overflow-y-auto pr-1">
+            <div>
+              <label className="block text-slate-400 mb-1">API Bearer Token</label>
+              <input 
+                type="password" 
+                value={apiToken} 
+                onChange={(e) => setApiToken(e.target.value)} 
+                autoComplete="off"
+                className="w-full bg-[#0E1422] border border-[#2A3754] rounded p-2 text-slate-100 focus:border-accent-cyan focus:outline-none font-mono" 
+              />
+              <p className="mt-1 text-[10px] text-slate-500 font-mono">Offline/mock default: dev-local-token</p>
+            </div>
             <div>
               <label className="block text-slate-400 mb-1">User Identifier</label>
               <input 
@@ -324,6 +337,10 @@ export default function ControlPanel() {
               </div>
             </div>
           </div>
+
+          {store.actionError && (
+            <p className="text-[10px] text-alert-crimson font-mono">{store.actionError}</p>
+          )}
 
           <button 
             type="submit" 
