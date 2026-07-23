@@ -274,14 +274,10 @@ class TestSimulationScenarios(unittest.TestCase):
         print("[+] Self-blocking iceberg deadlock, engine stall, and capsule collision verified!")
 
     def test_a2a_nodes_exposable(self):
-        """FR-3.5 / NFR-1.2: all four nodes must be to_a2a-exposable.
+        """FR-3.5 / NFR-1.2: LlmAgents + Workflow are to_a2a-exposable.
 
-        Verifies the get_a2a_nodes() factory is importable and that all four
-        nodes satisfy the to_a2a() type contract (BaseAgent | Workflow). The
-        actual to_a2a() call requires the google-adk[a2a] extra (the 'a2a'
-        SDK package). This test verifies structural eligibility and that the
-        ADK a2a utility module exists; it skips the live to_a2a() call if
-        the optional 'a2a' package is absent from the test environment.
+        Deterministic FunctionNodes prove parity via the serialization harness
+        in tests/test_a2a.py (ADK to_a2a requires BaseAgent|Workflow).
         """
         import importlib
         from app.core.nodes import (
@@ -292,31 +288,24 @@ class TestSimulationScenarios(unittest.TestCase):
         from google.adk.agents.base_agent import BaseAgent
         from google.adk.workflow import Workflow
 
-        # get_a2a_nodes must be callable (lazy factory — not eager)
         self.assertTrue(callable(get_a2a_nodes))
-
-        # LlmAgents are BaseAgent subclasses — valid to_a2a inputs
         self.assertIsInstance(goal_analyzer, BaseAgent)
         self.assertIsInstance(constraint_predictor, BaseAgent)
-
-        # The overall graph is a Workflow — also valid to_a2a input
         self.assertIsInstance(simulation_workflow, Workflow)
 
-        # The ADK a2a utility module must exist (even without the a2a SDK)
         spec = importlib.util.find_spec("google.adk.a2a.utils.agent_to_a2a")
         self.assertIsNotNone(
             spec,
             "google.adk.a2a.utils.agent_to_a2a not found — google-adk[a2a] not installed"
         )
 
-        # If the optional a2a SDK is present, actually call get_a2a_nodes()
         a2a_sdk = importlib.util.find_spec("a2a")
         if a2a_sdk is not None:
             nodes = get_a2a_nodes()
-            for name in ("goal_analyzer", "constraint_predictor", "weather_station", "path_simulator"):
+            for name in ("goal_analyzer", "constraint_predictor", "simulation_workflow"):
                 self.assertIn(name, nodes)
                 self.assertIsNotNone(nodes[name], f"to_a2a({name}) returned None")
-            print("[+] All four nodes A2A-exposable (a2a SDK present, get_a2a_nodes() verified)")
+            print("[+] A2A-exposable agents/workflow verified (a2a SDK present)")
         else:
             print("[+] FR-3.5 structural check passed — a2a SDK absent, get_a2a_nodes() import verified")
 
