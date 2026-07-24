@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field, model_validator
 from google.adk.agents.llm_agent import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.genai import types as genai_types
-from app.core.config import GEMINI_MODEL
+from app.core.config import GEMINI_MODEL, IS_OFFLINE
 from app.core.tools import logical_deadlocks_tool
 from app.core.simulation import check_logical_deadlocks
 from app.core.state import Vector2D as StateVector2D, get_typed_state, update_typed_state
@@ -179,9 +179,17 @@ Guidelines:
 6. If a semantic conflict is detected with low confidence (< 0.7), include it in the `conflicts` list to document it, but do NOT set `has_deadlock` to True. This ensures uncertain conflicts do not silently block the system.
 """
 
+def _predictor_model():
+    if not IS_OFFLINE:
+        return GEMINI_MODEL
+    from app.core.mock_llm import CannedResponseLlm
+    return CannedResponseLlm(canned_json=ConstraintConflictAssessment(
+        has_deadlock=False, conflicts=[]
+    ).model_dump_json())
+
 constraint_predictor = LlmAgent(
     name="ConstraintPredictor",
-    model=GEMINI_MODEL,
+    model=_predictor_model(),
     instruction=CONSTRAINT_PREDICTOR_INSTRUCTION,
     tools=[logical_deadlocks_tool],
     output_schema=ConstraintConflictAssessment,
@@ -254,9 +262,19 @@ Guidelines:
 4. Provide a detailed `evidence` string explaining your analysis, and a `confidence` score (0.0 to 1.0) indicating how certain you are of the assessment.
 """
 
+def _analyzer_model():
+    if not IS_OFFLINE:
+        return GEMINI_MODEL
+    from app.core.mock_llm import CannedResponseLlm
+    return CannedResponseLlm(canned_json=GoalAnalysisResult(
+        is_consistent=True,
+        evidence="Offline mode: request auto-approved by deterministic stand-in; symbolic guardrails (deadlock/collision checks) remain active.",
+        confidence=1.0,
+    ).model_dump_json())
+
 goal_analyzer = LlmAgent(
     name="GoalAnalyzer",
-    model=GEMINI_MODEL,
+    model=_analyzer_model(),
     instruction=GOAL_ANALYZER_INSTRUCTION,
     output_schema=GoalAnalysisResult,
     after_agent_callback=after_analyzer_callback

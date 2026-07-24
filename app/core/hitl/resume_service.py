@@ -5,9 +5,12 @@ resume mechanism. Enforces actor authorization, idempotency, version conflict de
 and goal-contract version alignment outside FastAPI handlers.
 """
 
+import logging
 import uuid
 import threading
 from typing import Dict, Any, Optional, List
+
+logger = logging.getLogger(__name__)
 from pydantic import BaseModel, Field
 from fastapi import HTTPException
 
@@ -174,7 +177,22 @@ class ResumeService:
         if payload.intent_vector is not None:
             raw_delta["intent_vector"] = payload.intent_vector
 
+        # Validate the transition against the typed-state contract (raises on
+        # invalid deltas) using the fetched session copy.
         update_typed_state(adk_session.state, raw_delta, validate_transition=True)
+
+        # Persist the resolution delta as a session event. Runner.run_async only
+        # persists state_delta when a new_message accompanies it; a resume call
+        # has no new message, so without this event the cleared constraints /
+        # intent override never reach the resumed invocation and the workflow
+        # re-interrupts on the same deadlock.
+        from google.adk.events import Event, EventActions
+        resolution_event = Event(
+            invocation_id=invocation_id,
+            author="user",
+            actions=EventActions(state_delta=raw_delta),
+        )
+        await runner.session_service.append_event(adk_session, resolution_event)
 
         trace_id = str(uuid.uuid4())
         second_interruption = None
@@ -193,7 +211,10 @@ class ResumeService:
             second_interruption = exc.payload
         except Exception as exc:
             # ADK runner may catch ADKInterruptionError inside node loop, read updated state
-            pass
+            logger.warning(
+                "Resume run_async raised %s for simulation %s (invocation %s): %s",
+                type(exc).__name__, simulation_id, invocation_id, exc,
+            )
 
         # Fetch latest state after resume attempt
         updated_adk = runner.session_service.get_session_sync(
@@ -211,7 +232,11 @@ class ResumeService:
                 second_interruption.model_dump()
                 if second_interruption
                 else final_state.interruption_payload
-            )
+            ) or {}
+            # The original checkpoint stays OPEN when the resume re-pauses, so
+            # surface its id/version to let clients retry from the pause dialog.
+            remaining_details.setdefault("checkpoint_id", chk.checkpoint_id)
+            remaining_details.setdefault("checkpoint_version", chk.checkpoint_version)
 
             # Keep session paused
             sim_session["hitl_interrupted"] = True

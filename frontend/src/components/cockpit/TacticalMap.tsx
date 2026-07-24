@@ -8,11 +8,17 @@ export default function TacticalMap() {
 
   const position = store.telemetryState?.current_position ?? { x: 0.0, y: 0.0 };
   const heading = store.telemetryState?.resultant_vector.heading_degrees ?? 0.0;
-  
-  // Build coordinates path string starting from (0,0)
-  const historyPoints = ["0,0", ...store.historyLogs.map(log => 
-    `${log.telemetry_snapshot.current_position.x},${log.telemetry_snapshot.current_position.y}`
-  )].join(' ');
+  const intentVec = store.telemetryState?.intent_vector ?? { magnitude: 0.0, heading_degrees: 0.0 };
+  const resultantVec = store.telemetryState?.resultant_vector ?? { magnitude: 0.0, heading_degrees: 0.0 };
+
+  // Trajectory points (world coordinates), starting from origin
+  const trajectory = [
+    { x: 0, y: 0 },
+    ...store.historyLogs.map(log => log.telemetry_snapshot.current_position),
+  ];
+  const historyPoints = trajectory.map(p => `${p.x},${p.y}`).join(' ');
+  const prevPoint = trajectory.length >= 2 ? trajectory[trajectory.length - 2] : null;
+  const lastPoint = trajectory[trajectory.length - 1];
 
   // Standard constraint icebergs
   const defaultIcebergs = [
@@ -24,28 +30,58 @@ export default function TacticalMap() {
 
   // Dynamic ViewBox calculations
   // global: fixed viewBox 700x1100, x: [-350, 350], y: [-50, 1050]
-  // tactical: centered on ship, width: 300, height: 300, y: [pos.y - 50, pos.y + 250]
+  // tactical: auto-fits the full trajectory (plus current position) with padding,
+  // so early turns fill the viewport and every steering move is clearly visible.
   const isTactical = zoomMode === 'tactical';
-  const viewBoxX = isTactical ? position.x - 150 : -350;
-  const viewBoxY = isTactical ? -(position.y + 250) : -1020;
-  const viewBoxWidth = isTactical ? 300 : 700;
-  const viewBoxHeight = isTactical ? 300 : 1100;
 
-  // Dynamic stroke widths & font sizes depending on zoom mode
-  const gridStroke = isTactical ? 0.4 : 0.8;
-  const pathStroke = isTactical ? 1.5 : 3.5;
-  const dotRadius = isTactical ? 2.5 : 4.5;
-  const dotStroke = isTactical ? 1.2 : 2.5;
-  const labelFontSize = isTactical ? 5 : 9;
+  const allPoints = [...trajectory, position];
+  const minX = Math.min(...allPoints.map(p => p.x));
+  const maxX = Math.max(...allPoints.map(p => p.x));
+  const minY = Math.min(...allPoints.map(p => p.y));
+  const maxY = Math.max(...allPoints.map(p => p.y));
+  const spanRaw = Math.max(maxX - minX, maxY - minY);
+  // 60% padding around the trajectory, never tighter than 80 world units
+  const tacticalSpan = Math.max(spanRaw * 1.6, 80);
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
 
-  // Dynamic grid coordinates generation based on focus center
-  const gridLinesY = isTactical 
-    ? Array.from({ length: 9 }, (_, i) => Math.floor((position.y - 50) / 50) * 50 + i * 50)
+  const viewBoxX = isTactical ? centerX - tacticalSpan / 2 : -350;
+  const viewBoxY = isTactical ? -(centerY + tacticalSpan / 2) : -1020;
+  const viewBoxWidth = isTactical ? tacticalSpan : 700;
+  const viewBoxHeight = isTactical ? tacticalSpan : 1100;
+
+  // Scale strokes/fonts with the zoom span so they render at constant screen size
+  const u = isTactical ? tacticalSpan / 300 : 1;
+  const gridStroke = isTactical ? 0.4 * u : 0.8;
+  const pathStroke = isTactical ? 1.5 * u : 3.5;
+  const dotRadius = isTactical ? 2.5 * u : 4.5;
+  const dotStroke = isTactical ? 1.2 * u : 2.5;
+  const labelFontSize = isTactical ? 5 * u : 9;
+
+  // Grid step: pick a "nice" spacing that yields ~5-8 lines across the view
+  const niceSteps = [5, 10, 20, 25, 50, 100, 200];
+  const gridStep = isTactical
+    ? (niceSteps.find(s => tacticalSpan / s <= 8) ?? 200)
+    : 0;
+
+  const gridLinesY = isTactical
+    ? Array.from({ length: Math.ceil(tacticalSpan / gridStep) + 2 },
+        (_, i) => Math.floor((centerY - tacticalSpan / 2) / gridStep) * gridStep + i * gridStep)
     : [200, 400, 600, 800, 1000];
 
   const gridLinesX = isTactical
-    ? Array.from({ length: 9 }, (_, i) => Math.floor((position.x - 150) / 50) * 50 + i * 50)
+    ? Array.from({ length: Math.ceil(tacticalSpan / gridStep) + 2 },
+        (_, i) => Math.floor((centerX - tacticalSpan / 2) / gridStep) * gridStep + i * gridStep)
     : [-200, -100, 0, 100, 200];
+
+  // Steering vectors, magnified to ~25% of the viewport so a course change
+  // (e.g. 0° vs 45°) is instantly visible even when per-turn distance is small.
+  const maxMag = Math.max(intentVec.magnitude, resultantVec.magnitude, 1);
+  const vectorScale = (isTactical ? tacticalSpan : 700) * 0.25 / maxMag;
+  const intentLen = intentVec.magnitude * vectorScale;
+  const resultantLen = resultantVec.magnitude * vectorScale;
+  const showVectors = intentVec.magnitude > 0 || resultantVec.magnitude > 0;
+  const arrowHead = (len: number) => `${-2.2 * u},${len - 4.5 * u} ${2.2 * u},${len - 4.5 * u} 0,${len}`;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden relative">
@@ -108,23 +144,23 @@ export default function TacticalMap() {
             ))}
 
             {/* Starting Coordinate Indicator (0,0) */}
-            <circle cx="0" cy="0" r={isTactical ? 2 : 5} fill="#1E293B" stroke="#475569" strokeWidth={isTactical ? 0.8 : 1.5} />
-            <g transform={`translate(0, ${isTactical ? -8 : -15}) scale(1, -1)`}>
+            <circle cx="0" cy="0" r={isTactical ? 2 * u : 5} fill="#1E293B" stroke="#475569" strokeWidth={isTactical ? 0.8 * u : 1.5} />
+            <g transform={`translate(0, ${isTactical ? -8 * u : -15}) scale(1, -1)`}>
               <text fill="#64748B" fontSize={labelFontSize} fontFamily="monospace" textAnchor="middle">START (0,0)</text>
             </g>
 
             {/* 🏔️ The Quantum Mountain Target (0, 1000) */}
             <polygon 
-              points={isTactical ? "-10,1000 10,1000 0,1015" : "-25,1000 25,1000 0,1050"} 
+              points={isTactical ? `${-10 * u},1000 ${10 * u},1000 0,${1000 + 15 * u}` : "-25,1000 25,1000 0,1050"} 
               fill="#161D30" 
               stroke="#00E5FF" 
-              strokeWidth={isTactical ? 1.5 : 2.5} 
+              strokeWidth={isTactical ? 1.5 * u : 2.5} 
             />
             {/* Glimmer Beacon */}
-            <circle cx="0" cy={isTactical ? 1015 : 1050} r={isTactical ? 2 : 4} fill="#00E5FF" className="animate-ping" />
-            <circle cx="0" cy={isTactical ? 1015 : 1050} r={isTactical ? 1 : 2} fill="#00E5FF" />
+            <circle cx="0" cy={isTactical ? 1000 + 15 * u : 1050} r={isTactical ? 2 * u : 4} fill="#00E5FF" className="animate-ping" />
+            <circle cx="0" cy={isTactical ? 1000 + 15 * u : 1050} r={isTactical ? 1 * u : 2} fill="#00E5FF" />
             
-            <g transform={`translate(0, ${isTactical ? 990 : 980}) scale(1, -1)`}>
+            <g transform={`translate(0, ${isTactical ? 1000 - 10 * u : 980}) scale(1, -1)`}>
               <text fill="#00E5FF" fontSize={labelFontSize} fontWeight="bold" fontFamily="monospace" textAnchor="middle">
                 MOUNTAIN (0,1000)
               </text>
@@ -139,11 +175,11 @@ export default function TacticalMap() {
                   r={ib.radius} 
                   fill="rgba(255, 51, 102, 0.03)" 
                   stroke={store.collisionThreats.includes(ib.name) ? "#FF3366" : "#2A3754"} 
-                  strokeWidth={isTactical ? 0.6 : 1.2} 
+                  strokeWidth={isTactical ? 0.6 * u : 1.2} 
                   strokeDasharray="4 3" 
                 />
-                <circle cx={ib.x} cy={ib.y} r={isTactical ? 1.5 : 3} fill={store.collisionThreats.includes(ib.name) ? "#FF3366" : "#475569"} />
-                <g transform={`translate(${ib.x}, ${ib.y + (isTactical ? 6 : 12)}) scale(1, -1)`}>
+                <circle cx={ib.x} cy={ib.y} r={isTactical ? 1.5 * u : 3} fill={store.collisionThreats.includes(ib.name) ? "#FF3366" : "#475569"} />
+                <g transform={`translate(${ib.x}, ${ib.y + (isTactical ? 6 * u : 12)}) scale(1, -1)`}>
                   <text 
                     fill={store.collisionThreats.includes(ib.name) ? "#FF3366" : "#64748B"} 
                     fontSize={labelFontSize} 
@@ -167,6 +203,20 @@ export default function TacticalMap() {
               strokeLinejoin="round"
             />
 
+            {/* Last-move highlight: emphasize the most recent displacement */}
+            {prevPoint && (
+              <line
+                x1={prevPoint.x}
+                y1={prevPoint.y}
+                x2={lastPoint.x}
+                y2={lastPoint.y}
+                stroke={store.isDrifting ? "#FF3366" : "#10F293"}
+                strokeWidth={pathStroke * 2.2}
+                strokeLinecap="round"
+                opacity="0.9"
+              />
+            )}
+
             {/* Turn Nodes Circles */}
             {store.historyLogs.map((log) => (
               <circle 
@@ -187,21 +237,39 @@ export default function TacticalMap() {
               x2="0" 
               y2="1000" 
               stroke="#00E5FF" 
-              strokeWidth={isTactical ? 0.6 : 1.2} 
+              strokeWidth={isTactical ? 0.6 * u : 1.2} 
               strokeDasharray="4 4" 
-              opacity="0.6"
+              opacity="0.4"
             />
 
+            {/* 🧭 Steering vectors (magnified): intent = where the CTO pointed,
+                resultant = where physics (storms) actually pushed the ship */}
+            {showVectors && intentLen > 0 && (
+              <g transform={`translate(${position.x}, ${position.y}) rotate(${-intentVec.heading_degrees})`}>
+                <line x1="0" y1={8 * u} x2="0" y2={intentLen} stroke="#00E5FF" strokeWidth={1.1 * u} strokeDasharray={`${3 * u} ${2.5 * u}`} opacity="0.9" />
+                <polygon points={arrowHead(intentLen)} fill="#00E5FF" opacity="0.9" />
+              </g>
+            )}
+            {showVectors && resultantLen > 0 && (
+              <g transform={`translate(${position.x}, ${position.y}) rotate(${-resultantVec.heading_degrees})`}>
+                <line x1="0" y1={8 * u} x2="0" y2={resultantLen} stroke="#10F293" strokeWidth={1.4 * u} opacity="0.95" />
+                <polygon points={arrowHead(resultantLen)} fill="#10F293" opacity="0.95" />
+              </g>
+            )}
+
             {/* 🚀 The Ship (Delta Wing structure with rotation applied) */}
-            <g transform={`translate(${position.x}, ${position.y}) rotate(${-heading})`}>
-              <circle cx="0" cy="0" r={isTactical ? 6 : 14} fill="rgba(0, 229, 255, 0.15)" className="animate-pulse" />
+            <g
+              transform={`translate(${position.x}, ${position.y}) rotate(${-heading})`}
+              style={{ transition: 'transform 600ms ease-out' }}
+            >
+              <circle cx="0" cy="0" r={isTactical ? 6 * u : 14} fill="rgba(0, 229, 255, 0.15)" className="animate-pulse" />
               <polygon 
-                points={isTactical ? "-4,-5 4,-5 0,6.5" : "-9,-10 9,-10 0,13"} 
+                points={isTactical ? `${-4 * u},${-5 * u} ${4 * u},${-5 * u} 0,${6.5 * u}` : "-9,-10 9,-10 0,13"} 
                 fill="#0E1422" 
                 stroke="#00E5FF" 
-                strokeWidth={isTactical ? 1 : 2} 
+                strokeWidth={isTactical ? 1 * u : 2} 
               />
-              <line x1="0" y1={isTactical ? -5 : -10} x2="0" y2={isTactical ? -9 : -18} stroke="#00E5FF" strokeWidth={isTactical ? 0.7 : 1.5} />
+              <line x1="0" y1={isTactical ? -5 * u : -10} x2="0" y2={isTactical ? -9 * u : -18} stroke="#00E5FF" strokeWidth={isTactical ? 0.7 * u : 1.5} />
             </g>
 
           </g>
@@ -215,7 +283,11 @@ export default function TacticalMap() {
           </div>
           <div className="flex items-center space-x-2">
             <span className="w-3 h-0.5 border-t border-dashed border-[#00E5FF]"></span>
-            <span className="text-slate-400">Direct heading intent</span>
+            <span className="text-slate-400">Intent vector (your steering)</span>
+          </div>
+          <div className="flex items-center space-x-2">
+            <span className="w-3 h-0.5 bg-[#10F293] opacity-70" style={{ clipPath: 'polygon(0 0, 100% 50%, 0 100%)' }}></span>
+            <span className="text-slate-400">Resultant vector (after storms)</span>
           </div>
           <div className="flex items-center space-x-2">
             <span className="w-3 h-3 rounded-full border border-[#FF3366] bg-red-950/10"></span>

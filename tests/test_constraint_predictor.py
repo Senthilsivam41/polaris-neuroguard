@@ -12,6 +12,11 @@ from app.core.agents import constraint_predictor, before_predictor_callback, Con
 
 class TestConstraintPredictorAgent(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # Pin the agent to a real Gemini model name so the Gemini patches in
+        # these tests take effect even when OFFLINE_MODE swaps in the mock LLM.
+        self._model_patcher = patch.object(constraint_predictor, "model", "gemini-2.0-flash")
+        self._model_patcher.start()
+        self.addCleanup(self._model_patcher.stop)
         self.session_service = InMemorySessionService()
         self.session = Session(id="test_session", app_name="test_app", user_id="test_user")
         self.session.state = {
